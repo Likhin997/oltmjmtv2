@@ -1,0 +1,8 @@
+{
+  "name": "Remix SmartOLT GPON Manager",
+  "description": "Production-grade FTTH/GPON OLT Management \u0026 Auto-Provisioning Platform for ZTE C320/C300 with Telnet/SSH/SNMP Engine, Optical Attenuation Monitoring, and OMCI CLI Generator.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

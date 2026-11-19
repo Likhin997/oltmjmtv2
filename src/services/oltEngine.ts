@@ -1,0 +1,2602 @@
+/**
+ * File: src/services/oltEngine.ts
+ * Modul 2: Engine Koneksi OLT (Telnet/SSH & SNMP), Regex Parser ZTE C300/C320 (ZXAN V2.1),
+ * Parser #show running-config asli, serta Generator Konfigurasi Otomatis (OMCI CLI +
+ * PPPoE + VLAN Database + Uplink Hybrid Tagging + WAN Remote Access + TR-069 CWMP ACS)
+ */
+
+export type WanRemoteAccessOption =
+  | 'Enabled from everywhere in the internet'
+  | 'Enabled only from NOC subnet'
+  | 'Disabled';
+
+export type ConfigMethodOption = 'OMCI' | 'TR069';
+
+export type OnuModeOption = 'Routing' | 'Bridging';
+
+export type WanModeOption = 'PPPOE' | 'DHCP' | 'STATIC_IP' | 'ONU_WEBPAGE' | 'BRIDGE';
+
+export interface UncfgOnuParsed {
+  ponInterface: string; // Contoh: gpon-olt_1/3/2
+  rack: number;
+  shelf: number;
+  slot: number;
+  port: number;
+  serialNumber: string; // Contoh: ZTEGC6A394D4
+  onuModel: string;     // Contoh: ALL atau F670LV9.0
+  firmwareVersion?: string;
+}
+
+export interface OnuStateParsed {
+  ponInterface: string; // Contoh: gpon-olt_1/3/2
+  onuIndex: number;     // 1 - 128
+  fullInterface: string; // Contoh: gpon-onu_1/3/2:8
+  adminState: 'ENABLED' | 'DISABLED';
+  omccState: 'ENABLED' | 'DISABLED';
+  phaseState: 'working' | 'LOS' | 'DyingGasp' | 'OffLine' | 'syncMib' | 'AuthFailed';
+  channel: string;
+}
+
+export interface OpticalPowerParsed {
+  oltTxDbm: number | null;
+  oltRxDbm: number | null;
+  onuTxDbm: number | null;
+  onuRxDbm: number | null;
+  upAttenuationDb: number | null;
+  downAttenuationDb: number | null;
+}
+
+export interface CliProvisioningParams {
+  firmwareVersion: 'V2.1.0' | 'V1.2.5P3';
+  ponInterface: string; // misal: gpon-olt_1/3/2
+  onuIndex: number;     // nomor index kosong 1..128
+  serialNumber: string; // misal: ZTEGC6A3BF19
+  onuType: string;      // misal: ALL atau F670LV9.0
+  customerName: string;
+  address: string;
+  tcontProfile: string; // misal: SMARTOLT-1G-UP
+  speedProfile: string; // misal: SMARTOLT-1G-DOWN
+  vlanId: number;       // misal: 101
+  onuMode?: OnuModeOption;
+  wanMode: WanModeOption;
+  configMethod?: ConfigMethodOption;
+  wanRemoteAccess?: WanRemoteAccessOption;
+  wanRemoteAllowedSubnet?: string; // misal: 10.69.69.1
+  pppoeUsername?: string;
+  pppoePassword?: string;
+  staticIpAddress?: string;
+  staticSubnetMask?: string;
+  staticGateway?: string;
+  staticDns1?: string;
+  hotspotBridgeVlan?: number | null; // misal: 120 atau 140 untuk extra flow VLAN
+  tr069Enabled?: boolean;
+  tr069AcsUrl?: string;
+  tr069AcsUsername?: string;
+  tr069AcsPassword?: string;
+  tr069PeriodicInterval?: number;
+  tr069MgmtVlanId?: number;
+  tr069Priority?: number;
+  tr069TcontProfile?: string;
+  tr069TrafficProfile?: string;
+  mgmtOnlyNoInternet?: boolean;
+  enableNat?: boolean;
+  vlanName?: string;
+  wifiSsid?: string;
+  wifiPassword?: string;
+  voipSipEnabled?: boolean;
+}
+
+/**
+ * Deteksi apakah nama/deskripsi VLAN termasuk VLAN management/non-NAT (misal: MJMT, MGMT, TR069)
+ * sehingga secara default perintah `nat` / `ip nat` dikecualikan dari skrip CLI.
+ */
+export function isNatExcludedVlanName(nameOrDesc?: string | null): boolean {
+  const raw = String(nameOrDesc || '').trim().toUpperCase();
+  if (!raw) return false;
+  return /(?:^|[^A-Z0-9])(MJMT|MGMT|TR069|MANAGEMENT)(?:[^A-Z0-9]|$)/.test(raw);
+}
+
+/**
+ * Resolusi status efektif Enable NAT untuk pembentukan skrip CLI OLT.
+ */
+export function resolveEffectiveEnableNat(params: {
+  enableNat?: boolean;
+  vlanEnableNat?: boolean;
+  vlanName?: string | null;
+  isMgmtOnly?: boolean;
+}): boolean {
+  if (params.isMgmtOnly) return false;
+  if (typeof params.enableNat === 'boolean') return params.enableNat;
+  if (typeof params.vlanEnableNat === 'boolean') return params.vlanEnableNat;
+  if (isNatExcludedVlanName(params.vlanName)) return false;
+  return true;
+}
+
+/**
+ * Hapus seluruh token `nat enable` dan perintah `ip nat` / `nat` saat checkbox Enable NAT tidak dicentang.
+ */
+export function stripNatCommandsFromCliLines(lines: string[]): string[] {
+  return lines
+    .filter((line) => !/^\s*(?:no\s+)?(?:ip\s+)?nat\b/i.test(line))
+    .map((line) =>
+      line.replace(/\b(pppoe(?:\s+\d+)?)\s+nat\s+enable\b/gi, '$1')
+    );
+}
+
+/**
+ * Helper pembersih artefak Telnet ZTE C300/C320:
+ * Menghapus ANSI escape sequence, prompt paging `--More--`, serta karakter backspace (`\x08`)
+ * yang disisipkan OLT saat menampilkan output panjang (`show running-config`, `show gpon onu state`, dll.)
+ */
+export function cleanZteCliText(raw: string): string {
+  if (!raw) return '';
+  return raw
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+    .replace(/--\s*More\s*--[\x08 \t]*/gi, '')
+    .replace(/\x08+[ \t]*\x08+/g, '')
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+}
+
+/**
+ * 1. ALGORITMA REGEX PARSER: `show gpon onu uncfg`
+ * Mendukung seluruh format output ZTE C300/C320 (V1.2.5P3, V2.1.0, hex 16-char SN, 2-kolom tanpa state, dll.)
+ */
+export function parseZteUncfgOutput(rawOutput: string): UncfgOnuParsed[] {
+  const results: UncfgOnuParsed[] = [];
+  const seenKeys = new Set<string>();
+  const cleaned = cleanZteCliText(rawOutput);
+  const lines = cleaned.split(/[\r\n]+/);
+
+  const isLikelySerialNumber = (tok: string): boolean => {
+    const t = tok.trim().toUpperCase();
+    if (!t || t.length < 8 || t.length > 20) return false;
+    const ignored = new Set([
+      'UNKNOWN',
+      'UNCFG',
+      'UNCONFIGURED',
+      'INITIAL',
+      'PASSWORD',
+      'ONUINDEX',
+      'OLTINDEX',
+      'SERIALNUMBER',
+      'WORKING',
+      'OFFLINE',
+      'DYINGGASP',
+    ]);
+    if (ignored.has(t)) return false;
+    // Standard 12-char GPON SN (e.g. ZTEGC6A394D4, ZICGB370351A, HWTC1A2B3C4D)
+    // or 16-char Hex SN (e.g. 4857544312345678, 5A544547AABBCCDD)
+    // or 8-16 alphanumeric token containing at least 4 hex digits and letters
+    return (
+      /^[A-Z]{4}[0-9A-F]{8}$/i.test(t) ||
+      /^[A-Z]{4}[A-Z0-9]{8,12}$/i.test(t) ||
+      /^[0-9A-F]{16}$/i.test(t) ||
+      (/^[A-Z0-9]{10,16}$/i.test(t) && /[A-Z]/i.test(t) && /\d/.test(t))
+    );
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (
+      !line ||
+      line.startsWith('---') ||
+      line.startsWith('%') ||
+      /^(?:onuindex|oltindex|interface|no\s+related)/i.test(line)
+    ) {
+      continue;
+    }
+
+    // Match `gpon-onu_1/3/3:1` or `gpon-olt_1/3/3` (or bare `1/3/3:1` on uncfg lines)
+    const ifMatch = line.match(
+      /(?:gpon-(?:onu|olt)_)?(\d+)\/(\d+)\/(\d+)(?::(\d+))?\s+(.+)$/i
+    );
+    if (!ifMatch) continue;
+    // Avoid false positive from non-interface version/date strings unless prefix or uncfg context
+    if (!/gpon-(?:onu|olt)_/i.test(line) && !/(unknown|uncfg|n\/a)/i.test(line)) {
+      continue;
+    }
+
+    const rack = parseInt(ifMatch[1], 10);
+    const shelf = parseInt(ifMatch[2], 10);
+    const port = parseInt(ifMatch[3], 10);
+    const restTokens = ifMatch[5].trim().split(/\s+/).filter(Boolean);
+    if (restTokens.length === 0) continue;
+
+    let sn = '';
+    let model = 'ALL';
+    let fw = 'V2.1.0';
+
+    const snIdx = restTokens.findIndex((tok) => isLikelySerialNumber(tok));
+    if (snIdx === -1) continue;
+
+    sn = restTokens[snIdx].toUpperCase();
+    // If there is a token before SN (not just numeric index like "1"), treat as model
+    for (let i = 0; i < snIdx; i++) {
+      const tok = restTokens[i];
+      if (!/^\d+$/.test(tok) && !/^(n\/a|-|none)$/i.test(tok)) {
+        model = tok.toUpperCase();
+      }
+    }
+    // Check tokens after SN for model / firmware if model wasn't set before SN
+    for (let i = snIdx + 1; i < restTokens.length; i++) {
+      const tok = restTokens[i];
+      const low = tok.toLowerCase();
+      if (low === 'unknown' || low === 'uncfg' || low === 'n/a' || low === '-') {
+        continue;
+      }
+      if (/^v\d+/i.test(tok)) {
+        fw = tok;
+      } else if (model === 'ALL') {
+        model = tok.toUpperCase();
+      }
+    }
+
+    if (model === 'ALL' && sn.startsWith('ZTEGCF')) {
+      model = 'F670LV9.0';
+    }
+
+    const ponInterface = `gpon-olt_${rack}/${shelf}/${port}`;
+    const dedupKey = `${ponInterface}:${sn}`;
+    if (seenKeys.has(dedupKey)) continue;
+    seenKeys.add(dedupKey);
+
+    results.push({
+      ponInterface,
+      rack,
+      shelf,
+      slot: shelf,
+      port,
+      serialNumber: sn,
+      onuModel: model,
+      firmwareVersion: fw,
+    });
+  }
+
+  return results;
+}
+
+export interface WanIpParsed {
+  currentIp: string | null;
+  currentMask: string | null;
+  gateway: string | null;
+  primaryDns: string | null;
+  secondaryDns: string | null;
+  status: string | null;
+  username: string | null;
+  password: string | null;
+  cvlan: number | null;
+  macAddress: string | null;
+  mode: string | null;
+}
+
+export interface OnuDetailInfoParsed {
+  adminState: 'ENABLED' | 'DISABLED' | null;
+  phaseState: OnuStateParsed['phaseState'] | null;
+  serialNumber: string | null;
+  name: string | null;
+  distanceM: number | null;
+  onlineDuration: string | null;
+  lastOfflineReason: string | null;
+  lastAuthTime: string | null;
+  lastOfflineTime: string | null;
+}
+
+export function normalizeZtePhaseState(
+  phaseRaw: string,
+  offlineCauseRaw?: string | null
+): OnuStateParsed['phaseState'] {
+  const clean = (phaseRaw || '').trim().toLowerCase();
+  const cause = (offlineCauseRaw || '').trim().toLowerCase();
+
+  if (clean === 'working' || clean === 'online' || clean === 'up') {
+    return 'working';
+  }
+  if (
+    clean === 'los' ||
+    clean === 'losi' ||
+    clean === 'lofi' ||
+    clean === 'lof' ||
+    clean === 'loami'
+  ) {
+    return 'LOS';
+  }
+  if (
+    clean === 'dyinggasp' ||
+    clean === 'dying-gasp' ||
+    clean === 'dying_gasp' ||
+    clean === 'poweroff' ||
+    clean === 'power-off' ||
+    clean === 'pwrfail'
+  ) {
+    return 'DyingGasp';
+  }
+  if (clean === 'syncmib' || clean === 'sync-mib') {
+    return 'syncMib';
+  }
+  if (clean === 'authfailed' || clean === 'auth-failed') {
+    return 'AuthFailed';
+  }
+
+  // On ZTE C300, when an ONU is down in `logging` or `OffLine` state, check its last offline cause
+  if (cause.includes('dyinggasp') || cause.includes('dying-gasp') || cause.includes('power')) {
+    return 'DyingGasp';
+  }
+  if (cause.includes('los') || cause.includes('lof')) {
+    return 'LOS';
+  }
+
+  return 'OffLine';
+}
+
+/**
+ * 2. ALGORITMA REGEX PARSER: `show gpon onu state [gpon-olt_1/x/y]`
+ */
+export function parseZteOnuStateOutput(rawOutput: string): OnuStateParsed[] {
+  const results: OnuStateParsed[] = [];
+  const seenKeys = new Set<string>();
+  const cleaned = cleanZteCliText(rawOutput);
+  const lines = cleaned.split(/[\r\n]+/);
+
+  const stateRegex =
+    /(?:gpon-onu_)?(\d+)\/(\d+)\/(\d+):(\d+)\s+(enable|disable|unlock|lock)\s+(enable|disable|up|down)\s+([A-Za-z0-9_\-]+)(?:\s+(\S+))?/i;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('---') || /^onuindex/i.test(line)) continue;
+    const match = line.match(stateRegex);
+    if (!match) continue;
+
+    const rack = match[1];
+    const slot = match[2];
+    const port = match[3];
+    const onuIndex = parseInt(match[4], 10);
+    const fullInterface = `gpon-onu_${rack}/${slot}/${port}:${onuIndex}`;
+    const key = fullInterface.toLowerCase();
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+
+    const adminRaw = match[5].toLowerCase();
+    const omccRaw = match[6].toLowerCase();
+    const phaseRaw = match[7];
+
+    const normalizedPhase = normalizeZtePhaseState(phaseRaw);
+
+    results.push({
+      ponInterface: `gpon-olt_${rack}/${slot}/${port}`,
+      onuIndex,
+      fullInterface,
+      adminState:
+        adminRaw === 'enable' || adminRaw === 'unlock' ? 'ENABLED' : 'DISABLED',
+      omccState: omccRaw === 'enable' || omccRaw === 'up' ? 'ENABLED' : 'DISABLED',
+      phaseState: normalizedPhase,
+      channel: match[8] || '1(GPON)',
+    });
+  }
+
+  return results;
+}
+
+export interface OnuBaseinfoParsed {
+  board: number;
+  port: number;
+  onuIndex: number;
+  onuType: string;
+  serialNumber: string;
+}
+
+/**
+ * 2a. ALGORITMA REGEX PARSER: `show gpon onu baseinfo [gpon-olt_1/x/y]`
+ * Contoh baris ZTE C300/C320:
+ *   gpon-onu_1/3/2:1   ALL          sn     SN:ZTEGC6A3802C   ready
+ *   1/3/2:2            ZTE-F670L    sn     SN:ZTEGC6A394D4   enable
+ */
+export function parseZteOnuBaseinfoOutput(rawOutput: string): Map<string, OnuBaseinfoParsed> {
+  const map = new Map<string, OnuBaseinfoParsed>();
+  const cleaned = cleanZteCliText(rawOutput);
+  const lines = cleaned.split(/[\r\n]+/);
+  const baseinfoRegex =
+    /(?:gpon-onu_)?(\d+)\/(\d+)\/(\d+):(\d+)\s+([A-Za-z0-9\-_.]+)\s+(?:sn|mac|pw|loid|\S+)\s+(?:SN:)?([A-Z0-9]{8,16})/i;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('---') || /^onuindex/i.test(line)) continue;
+    const m = line.match(baseinfoRegex);
+    if (!m) continue;
+    const board = parseInt(m[2], 10);
+    const port = parseInt(m[3], 10);
+    const onuIndex = parseInt(m[4], 10);
+    const key = `1/${board}/${port}:${onuIndex}`;
+    map.set(key, {
+      board,
+      port,
+      onuIndex,
+      onuType: m[5].trim().toUpperCase(),
+      serialNumber: m[6].trim().toUpperCase(),
+    });
+  }
+  return map;
+}
+
+/**
+ * 2b. ALGORITMA REGEX PARSER: `show gpon onu detail-info gpon-onu_1/x/y:z`
+ * Membaca Phase state, Online Duration, Distance, serta riwayat Authpass/Offline Cause (DyingGasp / LOS)
+ */
+export function parseZteOnuDetailInfo(rawOutput: string): OnuDetailInfoParsed {
+  const cleaned = cleanZteCliText(rawOutput);
+  const adminMatch = cleaned.match(/Admin\s+state\s*:\s*(\S+)/i);
+  const phaseMatch = cleaned.match(/Phase\s+state\s*:\s*(\S+)/i);
+  const snMatch = cleaned.match(/Serial\s+number\s*:\s*([A-Z0-9]{8,16})/i);
+  const nameMatch = cleaned.match(/^\s*Name\s*:\s*([^\r\n]+)/im);
+  const distMatch = cleaned.match(/ONU\s+Distance\s*:\s*(\d+)\s*m/i);
+  const durMatch = cleaned.match(/Online\s+Duration\s*:\s*([^\r\n]+)/i);
+
+  // Parse the last entry of the ZTE Authpass/OfflineTime/Cause table:
+  //   1   2026-11-10 14:20:11    2026-11-10 16:45:02     DyingGasp
+  const historyRegex =
+    /^\s*\d+\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}|N\/A|0000-00-00\s+00:00:00)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}|N\/A|0000-00-00\s+00:00:00)\s+([A-Za-z0-9_\-]+)/gim;
+  let hm: RegExpExecArray | null;
+  let lastAuthTime: string | null = null;
+  let lastOfflineTime: string | null = null;
+  let lastCause: string | null = null;
+
+  while ((hm = historyRegex.exec(cleaned)) !== null) {
+    if (hm[1] && hm[1] !== 'N/A' && !hm[1].startsWith('0000')) {
+      lastAuthTime = hm[1].trim();
+    }
+    if (hm[2] && hm[2] !== 'N/A' && !hm[2].startsWith('0000')) {
+      lastOfflineTime = hm[2].trim();
+    }
+    if (hm[3]) {
+      lastCause = hm[3].trim();
+    }
+  }
+
+  const rawPhase = phaseMatch ? phaseMatch[1].trim() : null;
+  const phaseState = rawPhase ? normalizeZtePhaseState(rawPhase, lastCause) : null;
+
+  return {
+    adminState: adminMatch
+      ? /enable|unlock/i.test(adminMatch[1])
+        ? 'ENABLED'
+        : 'DISABLED'
+      : null,
+    phaseState,
+    serialNumber: snMatch ? snMatch[1].trim().toUpperCase() : null,
+    name: nameMatch ? nameMatch[1].trim() : null,
+    distanceM: distMatch ? parseInt(distMatch[1], 10) : null,
+    onlineDuration: durMatch ? durMatch[1].trim() : null,
+    lastOfflineReason: lastCause,
+    lastAuthTime,
+    lastOfflineTime,
+  };
+}
+
+/**
+ * 2b-multi. Multi-ONU `show gpon onu detail-info gpon-onu_1/B/P:I` Parser
+ */
+export function parseZteMultiOnuDetailInfo(
+  rawOutput: string
+): Map<string, OnuDetailInfoParsed> {
+  const map = new Map<string, OnuDetailInfoParsed>();
+  const cleaned = cleanZteCliText(rawOutput);
+  const regex =
+    /show\s+gpon\s+onu\s+detail-info\s+(gpon-onu_\d+\/\d+\/\d+:\d+)([\s\S]*?)(?=show\s+gpon\s+|show\s+running-config|show\s+onu\s+|show\s+pon\s+|$)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(cleaned)) !== null) {
+    const fullIf = m[1].trim().toLowerCase();
+    const parsed = parseZteOnuDetailInfo(m[2]);
+    map.set(fullIf, parsed);
+  }
+  return map;
+}
+
+/**
+ * 2c. ALGORITMA REGEX PARSER:
+ * Mendukung ketiga perintah ZTE C300/C320 untuk membaca IP WAN PPPoE dari MikroTik / BNG:
+ * - `show gpon remote-onu ip-host gpon-onu_1/x/y:z` (`CurIP: 10.x.x.x`, `CurMask:`, `CurGateway:`, `MAC:`)
+ * - `show gpon remote-onu pppoe gpon-onu_1/x/y:z` (`User:`, `Status:`, `CurIP:`)
+ * - `show gpon remote-onu wan-ip gpon-onu_1/x/y:z` (`Current IP: 10.x.x.x`, `Status:`, `Username:`)
+ */
+export function parseZteWanIpOutput(rawOutput: string): WanIpParsed {
+  const cleanedFull = rawOutput.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+
+  // Isolate only the `show gpon remote-onu` output section if present,
+  // so OLT Telnet login banners (`Username: zte`, `Password:`, `% The password is not strong...`)
+  // are NEVER mistakenly parsed as PPPoE credentials!
+  const remoteOnuIdx = cleanedFull.search(
+    /show\s+gpon\s+remote-onu\s+(?:ip-host|pppoe|wan-ip)/i
+  );
+  const cleaned =
+    remoteOnuIdx >= 0 ? cleanedFull.slice(remoteOnuIdx) : cleanedFull;
+
+  // Collect all candidate runtime IPs from CurIP / Cur IP / Current IP (ignoring `Identify: IP: 0.0.0.0`)
+  const ipCandidates: string[] = [];
+  const ipRegex =
+    /(?:Cur\s*IP|Current\s+IP(?:\s+address)?|^\s*IP\s+address)\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/gim;
+  let im: RegExpExecArray | null;
+  while ((im = ipRegex.exec(cleaned)) !== null) {
+    if (im[1]) {
+      ipCandidates.push(im[1].trim());
+    }
+  }
+
+  // Pick the first active non-zero IP (Host ID 1 PPPoE WAN IP from MikroTik)
+  const validIp =
+    ipCandidates.find(
+      (ip) => ip !== '0.0.0.0' && ip !== '255.255.255.255' && ip !== '127.0.0.1'
+    ) || null;
+
+  const maskMatch =
+    cleaned.match(/Cur\s*Mask\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
+    cleaned.match(/Current\s+mask\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
+    cleaned.match(/Subnet\s+mask\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i);
+  const gwMatch =
+    cleaned.match(/Cur\s*Gateway\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
+    cleaned.match(/Current\s+gateway\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
+    cleaned.match(/Default\s+gateway\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i);
+  const dns1Match =
+    cleaned.match(/Cur\s*(?:Pri|Primary)\s*DNS\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
+    cleaned.match(/Current\s+primary\s+DNS\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i);
+  const dns2Match =
+    cleaned.match(/Cur\s*(?:Sec|Secondary)\s*DNS\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
+    cleaned.match(/Current\s+secondary\s+DNS\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i);
+  const statusMatch = cleaned.match(/^[ \t]*Status[ \t]*:[ \t]*([^\r\n.]+)/im);
+
+  // IMPORTANT: Use `[ \t]+` (same-line horizontal whitespace only, NOT `\s*` which crosses newlines!)
+  // so `Password:\r\n% The password is not strong...` from Telnet login is NEVER matched!
+  const pppoeBlockIdx = cleaned.search(/show\s+gpon\s+remote-onu\s+(?:pppoe|wan-ip)/i);
+  const pppoeSection = pppoeBlockIdx >= 0 ? cleaned.slice(pppoeBlockIdx) : cleaned;
+
+  const userMatch = pppoeSection.match(
+    /^[ \t]*(?:User[ \t]*name|Username|User)[ \t]*:[ \t]+([A-Za-z0-9._@-]+)[ \t]*$/im
+  );
+  const passMatch = pppoeSection.match(
+    /^[ \t]*Password[ \t]*:[ \t]+([A-Za-z0-9._@!#$^&*+-]+)[ \t]*$/im
+  );
+  const cvlanMatch = cleaned.match(/^[ \t]*CVLAN[ \t]*:[ \t]*(\d+)/im);
+  const macMatch = cleaned.match(
+    /^[ \t]*MAC(?:[ \t]+address)?[ \t]*:[ \t]*([0-9a-fA-F:.\-]+)/im
+  );
+  const modeMatch = cleaned.match(/^[ \t]*Mode[ \t]*:[ \t]*([^\r\n.]+)/im);
+
+  const rawUser = userMatch ? userMatch[1].trim() : '';
+  const rawPass = passMatch ? passMatch[1].trim() : '';
+
+  const isValidPppoeUser =
+    rawUser.length > 0 &&
+    rawUser.toLowerCase() !== 'n/a' &&
+    rawUser.toLowerCase() !== 'null' &&
+    rawUser.toLowerCase() !== 'none' &&
+    rawUser.toLowerCase() !== 'zte' &&
+    !rawUser.startsWith('%');
+
+  const isValidPppoePass =
+    rawPass.length > 0 &&
+    rawPass.toLowerCase() !== 'n/a' &&
+    rawPass.toLowerCase() !== 'null' &&
+    !rawPass.includes('%') &&
+    !rawPass.toLowerCase().includes('password');
+
+  return {
+    currentIp: validIp,
+    currentMask: maskMatch ? maskMatch[1].trim() : null,
+    gateway: gwMatch ? gwMatch[1].trim() : null,
+    primaryDns: dns1Match ? dns1Match[1].trim() : null,
+    secondaryDns: dns2Match ? dns2Match[1].trim() : null,
+    status: statusMatch ? statusMatch[1].trim() : validIp ? 'connected' : null,
+    username: isValidPppoeUser ? rawUser : null,
+    password: isValidPppoePass ? rawPass : null,
+    cvlan:
+      cvlanMatch && parseInt(cvlanMatch[1], 10) > 0
+        ? parseInt(cvlanMatch[1], 10)
+        : null,
+    macAddress: macMatch ? macMatch[1].trim().replace(/\.$/, '') : null,
+    mode: modeMatch ? modeMatch[1].trim() : null,
+  };
+}
+
+/**
+ * 2d. Multi-ONU WAN IP Parser untuk batch `show gpon remote-onu ip-host / pppoe / wan-ip gpon-onu_1/B/P:I`
+ */
+export function parseZteMultiWanIpOutput(
+  rawOutput: string
+): Map<string, WanIpParsed> {
+  const map = new Map<string, WanIpParsed>();
+  const regex =
+    /show\s+gpon\s+remote-onu\s+(?:ip-host|pppoe|wan-ip)\s+(gpon-onu_\d+\/\d+\/\d+:\d+)([\s\S]*?)(?=show\s+gpon\s+(?:remote-onu|onu)|show\s+pon\s+power|$)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(rawOutput)) !== null) {
+    const key = m[1].trim().toLowerCase();
+    const parsed = parseZteWanIpOutput(m[2]);
+    const prev = map.get(key);
+    if (!prev) {
+      map.set(key, parsed);
+    } else {
+      map.set(key, {
+        currentIp: parsed.currentIp || prev.currentIp,
+        currentMask: parsed.currentMask || prev.currentMask,
+        gateway: parsed.gateway || prev.gateway,
+        primaryDns: parsed.primaryDns || prev.primaryDns,
+        secondaryDns: parsed.secondaryDns || prev.secondaryDns,
+        status: parsed.status || prev.status,
+        username: parsed.username || prev.username,
+        password: parsed.password || prev.password,
+        cvlan: parsed.cvlan || prev.cvlan,
+        macAddress: parsed.macAddress || prev.macAddress,
+        mode: parsed.mode || prev.mode,
+      });
+    }
+  }
+  return map;
+}
+
+/**
+ * 2e. Parser Tabel Redaman Optik per Port PON:
+ * `show pon power onu-rx gpon-olt_1/3/2` atau `show pon power olt-rx gpon-olt_1/3/2`
+ */
+export function parseZtePonPowerRxTable(
+  rawOutput: string
+): Map<string, number | null> {
+  const map = new Map<string, number | null>();
+  const cleaned = rawOutput.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  const lines = cleaned.split(/[\r\n]+/);
+  const rowRegex =
+    /^\s*(gpon-onu_\d+\/\d+\/\d+:\d+)\s+([+-]?\d+(?:\.\d+)?(?=\s*\(dbm\))|N\/A|no\s+signal)/i;
+
+  for (const line of lines) {
+    const m = line.match(rowRegex);
+    if (!m) continue;
+    const key = m[1].trim().toLowerCase();
+    const valStr = m[2].trim().toLowerCase();
+    if (valStr === 'n/a' || valStr.includes('no signal')) {
+      map.set(key, null);
+    } else {
+      const num = parseFloat(valStr);
+      map.set(key, isNaN(num) ? null : num);
+    }
+  }
+  return map;
+}
+
+/**
+ * 3. ALGORITMA REGEX PARSER: `show pon power attenuation gpon-onu_1/x/y:z`
+ */
+export function parseZteOpticalAttenuation(rawOutput: string): OpticalPowerParsed {
+  const result: OpticalPowerParsed = {
+    oltTxDbm: null,
+    oltRxDbm: null,
+    onuTxDbm: null,
+    onuRxDbm: null,
+    upAttenuationDb: null,
+    downAttenuationDb: null,
+  };
+
+  const upRegex =
+    /up\s+Rx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A|no\s+signal)\s*(?:\(dbm\))?\s+Tx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A)\s*(?:\(dbm\))?\s+([+-]?\d+(?:\.\d+)?|N\/A)/i;
+
+  const downRegex =
+    /down\s+Tx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A)\s*(?:\(dbm\))?\s+Rx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A|no\s+signal)\s*(?:\(dbm\))?\s+([+-]?\d+(?:\.\d+)?|N\/A)/i;
+
+  const upMatch = rawOutput.match(upRegex);
+  if (upMatch) {
+    const val = upMatch[1].trim().toLowerCase();
+    result.oltRxDbm =
+      val !== 'n/a' && !val.includes('no signal') ? parseFloat(upMatch[1]) : null;
+    result.onuTxDbm = upMatch[2] !== 'N/A' ? parseFloat(upMatch[2]) : null;
+    result.upAttenuationDb = upMatch[3] !== 'N/A' ? parseFloat(upMatch[3]) : null;
+  }
+
+  const downMatch = rawOutput.match(downRegex);
+  if (downMatch) {
+    result.oltTxDbm = downMatch[1] !== 'N/A' ? parseFloat(downMatch[1]) : null;
+    const val = downMatch[2].trim().toLowerCase();
+    result.onuRxDbm =
+      val !== 'n/a' && !val.includes('no signal') ? parseFloat(downMatch[2]) : null;
+    result.downAttenuationDb = downMatch[3] !== 'N/A' ? parseFloat(downMatch[3]) : null;
+  }
+
+  return result;
+}
+
+export interface InterfaceTrafficParsed {
+  downloadMbps: number | null; // OLT Output -> ONU Download
+  uploadMbps: number | null;   // OLT Input  <- ONU Upload
+  inBytes: number | null;      // Cumulative Upstream Bytes (ONU Upload)
+  outBytes: number | null;     // Cumulative Downstream Bytes (ONU Download)
+  inPackets: number | null;
+  outPackets: number | null;
+}
+
+/**
+ * 3b. ALGORITMA REGEX PARSER: `show interface gpon-onu_1/x/y:z`
+ * Membaca real-time input/output rate (Bps / bps / Kbps / Mbps) serta total Input/Output Bytes
+ * Catatan arah trafik pada interface OLT `gpon-onu_1/B/P:I`:
+ * - OLT `input rate` / `Input Bytes`   = Upstream dari ONU ke OLT  (UPLOAD pelanggan)
+ * - OLT `output rate` / `Output Bytes` = Downstream dari OLT ke ONU (DOWNLOAD pelanggan)
+ */
+export function parseZteInterfaceTraffic(
+  rawOutput: string,
+  isUplinkDirection = false
+): InterfaceTrafficParsed {
+  const cleaned = cleanZteCliText(rawOutput);
+  const ifSectionIdx = cleaned.search(/show\s+interface\s+/i);
+  const section = ifSectionIdx >= 0 ? cleaned.slice(ifSectionIdx) : cleaned;
+
+  const parseRateToMbps = (valStr: string, unitRaw: string): number => {
+    const val = parseFloat(valStr);
+    if (isNaN(val) || val < 0) return 0;
+    const u = unitRaw.trim();
+    if (/^Gbps$/i.test(u) || /^Gbit\/s$/i.test(u)) {
+      return Number((val * 1000).toFixed(3));
+    }
+    if (/^MBps$/i.test(u) && u.includes('B')) {
+      return Number((val * 8).toFixed(3));
+    }
+    if (/^Mbps$/i.test(u) || /^Mbit\/s$/i.test(u)) {
+      return Number(val.toFixed(3));
+    }
+    if (/^KBps$/i.test(u) && u.includes('B')) {
+      return Number(((val * 8) / 1000).toFixed(3));
+    }
+    if (/^Kbps$/i.test(u) || /^Kbit\/s$/i.test(u)) {
+      return Number((val / 1000).toFixed(3));
+    }
+    // ZTE C300/C320 uses `Bps` (capital B = Bytes per second) vs `bps` / `bits/sec`
+    if (u === 'Bps' || /^bytes\/s/i.test(u)) {
+      return Number(((val * 8) / 1_000_000).toFixed(3));
+    }
+    // bits/sec or bps
+    return Number((val / 1_000_000).toFixed(3));
+  };
+
+  // Match ZTE "120 seconds input rate : 45812940 Bps" or "5 minutes input rate 48291000 bits/sec"
+  // Exclude "Input peak rate :" by requiring either "seconds/minutes" before "input rate" or start-of-line "input rate"
+  const inRateMatch =
+    section.match(
+      /(?:seconds|minutes|sec|min)\s+input\s+rate\s*:?\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Kbit\/s|Mbps|MBps|Mbit\/s|Gbps|Gbit\/s)/i
+    ) ||
+    section.match(
+      /(?:^|[\r\n])\s*input\s+rate\s*:?\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Kbit\/s|Mbps|MBps|Mbit\/s|Gbps|Gbit\/s)/i
+    );
+  const outRateMatch =
+    section.match(
+      /(?:seconds|minutes|sec|min)\s+output\s+rate\s*:?\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Kbit\/s|Mbps|MBps|Mbit\/s|Gbps|Gbit\/s)/i
+    ) ||
+    section.match(
+      /(?:^|[\r\n])\s*output\s+rate\s*:?\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Kbit\/s|Mbps|MBps|Mbit\/s|Gbps|Gbit\/s)/i
+    );
+
+  // Extract cumulative Input Bytes & Output Bytes
+  const inputBlockMatch = section.match(
+    /Input\s*:\s*[\r\n]+([\s\S]*?)(?=Output\s*:|ZXAN|$)/i
+  );
+  const outputBlockMatch = section.match(
+    /Output\s*:\s*[\r\n]+([\s\S]*?)(?=ZXAN|show\s+|$)/i
+  );
+
+  let inBytes: number | null = null;
+  let inPackets: number | null = null;
+  if (inputBlockMatch) {
+    const pm = inputBlockMatch[1].match(/Packets\s*:\s*(\d+)/i);
+    const bm = inputBlockMatch[1].match(/Bytes\s*:\s*(\d+)/i);
+    if (pm) inPackets = parseInt(pm[1], 10);
+    if (bm) inBytes = parseInt(bm[1], 10);
+  } else {
+    const octIn = section.match(/(?:InOctets|Input\s+Bytes|Rx\s+Bytes)\s*[:=]\s*(\d+)/i);
+    if (octIn) inBytes = parseInt(octIn[1], 10);
+  }
+
+  let outBytes: number | null = null;
+  let outPackets: number | null = null;
+  if (outputBlockMatch) {
+    const pm = outputBlockMatch[1].match(/Packets\s*:\s*(\d+)/i);
+    const bm = outputBlockMatch[1].match(/Bytes\s*:\s*(\d+)/i);
+    if (pm) outPackets = parseInt(pm[1], 10);
+    if (bm) outBytes = parseInt(bm[1], 10);
+  } else {
+    const octOut = section.match(/(?:OutOctets|Output\s+Bytes|Tx\s+Bytes)\s*[:=]\s*(\d+)/i);
+    if (octOut) outBytes = parseInt(octOut[1], 10);
+  }
+
+  const inRateMbps = inRateMatch
+    ? parseRateToMbps(inRateMatch[1], inRateMatch[2])
+    : null;
+  const outRateMbps = outRateMatch
+    ? parseRateToMbps(outRateMatch[1], outRateMatch[2])
+    : null;
+
+  // On Uplink (xgei/gei): Input from Core Router = Download, Output to Core Router = Upload
+  // On PON/ONU (gpon-olt/gpon-onu): Output from OLT to ONU = Download, Input from ONU to OLT = Upload
+  const downloadMbps = isUplinkDirection ? inRateMbps : outRateMbps;
+  const uploadMbps = isUplinkDirection ? outRateMbps : inRateMbps;
+
+  return {
+    downloadMbps,
+    uploadMbps,
+    inBytes,
+    outBytes,
+    inPackets,
+    outPackets,
+  };
+}
+
+/**
+ * 3c. Multi-Interface Traffic Parser untuk Uplink (`xgei_1/19/1`, `gei_1/19/3`) & PON (`gpon-olt_1/3/1`, dll.)
+ */
+export function parseZteMultiInterfaceTraffic(
+  rawOutput: string
+): Map<string, InterfaceTrafficParsed> {
+  const map = new Map<string, InterfaceTrafficParsed>();
+  const cleaned = cleanZteCliText(rawOutput);
+  const regex =
+    /show\s+interface\s+([A-Za-z0-9_\-\/:.]+)([\s\S]*?)(?=show\s+interface\s+|$)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(cleaned)) !== null) {
+    const ifName = m[1].trim().toLowerCase();
+    if (/^vlan/i.test(ifName)) continue;
+    const isUplink = /^(?:x?gei|smartgroup)(?:_|\d)/i.test(ifName) && !ifName.includes('.');
+    const parsed = parseZteInterfaceTraffic(`show interface ${ifName}\n${m[2]}`, isUplink);
+    map.set(ifName, parsed);
+  }
+
+  // Fallback: also match blocks starting with `<ifName> is up/down` if command echo was omitted
+  const headerRegex =
+    /(?:^|[\r\n])\s*((?:x?gei|smartgroup|gpon-olt|gpon-onu)[A-Za-z0-9_\-\/:.]+)\s+is\s+(?:up|down|administratively\s+down)([\s\S]*?)(?=(?:^|[\r\n])\s*(?:x?gei|smartgroup|gpon-olt|gpon-onu)[A-Za-z0-9_\-\/:.]+\s+is\s+|show\s+interface\s+|$)/gi;
+  let hm: RegExpExecArray | null;
+  while ((hm = headerRegex.exec(cleaned)) !== null) {
+    const ifName = hm[1].trim().toLowerCase();
+    if (/^vlan/i.test(ifName)) continue;
+    if (!map.has(ifName)) {
+      const isUplink = /^(?:x?gei|smartgroup)(?:_|\d)/i.test(ifName) && !ifName.includes('.');
+      const parsed = parseZteInterfaceTraffic(`show interface ${ifName}\n${hm[2]}`, isUplink);
+      map.set(ifName, parsed);
+    }
+  }
+
+  return map;
+}
+
+/**
+ * 4. ALGORITMA PENCARI `onu_index` KOSONG OTOMATIS PADA PORT PON (1 s/d 128)
+ * Contoh nyata pada running-config: Port 1/3/4 memiliki ONU 1,2,3,4,5,6,7,9 -> otomatis menemukan index 8!
+ */
+export function findNextAvailableOnuIndex(usedIndices: number[], maxCapacity = 128): number {
+  const usedSet = new Set(usedIndices.filter((n) => Number.isInteger(n) && n > 0));
+  for (let idx = 1; idx <= maxCapacity; idx++) {
+    if (!usedSet.has(idx)) {
+      return idx;
+    }
+  }
+  throw new Error(`Port GPON penuh! Seluruh ${maxCapacity} slot ONU sudah terpakai.`);
+}
+
+/**
+ * Helper pembangkit baris CLI ZTE asli untuk `WAN remote access` (`security-mgmt`)
+ * Sesuai persis dengan running-config:
+ *   security-mgmt 1 state enable mode forward protocol web https
+ *   security-mgmt 10 state enable mode forward protocol web https
+ *   security-mgmt 10 start-src-ip 10.69.69.1 end-src-ip 10.69.69.1
+ *   security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+ *   security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+ */
+export function buildWanRemoteAccessCliLines(
+  wanRemoteAccess: WanRemoteAccessOption = 'Enabled from everywhere in the internet',
+  allowedSubnet = '10.69.69.1'
+): string[] {
+  if (wanRemoteAccess === 'Disabled') {
+    return [
+      `  security-mgmt 1 state disable protocol web https`,
+      `  security-mgmt 998 state enable mode forward ingress-type lan protocol web https`,
+      `  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069`,
+    ];
+  }
+
+  if (wanRemoteAccess === 'Enabled only from NOC subnet') {
+    const cleanIp = allowedSubnet.split('/')[0].trim() || '10.69.69.1';
+    return [
+      `  security-mgmt 1 state enable mode forward protocol web https`,
+      `  security-mgmt 10 state enable mode forward protocol web https`,
+      `  security-mgmt 10 start-src-ip ${cleanIp} end-src-ip ${cleanIp}`,
+      `  security-mgmt 998 state enable mode forward ingress-type lan protocol web https`,
+      `  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069`,
+    ];
+  }
+
+  // Default sesuai running-config: Enabled from everywhere in the internet
+  return [
+    `  security-mgmt 1 state enable mode forward protocol web https`,
+    `  security-mgmt 998 state enable mode forward ingress-type lan protocol web https`,
+    `  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069`,
+  ];
+}
+
+/**
+ * Helper pembangkit baris CLI ZTE asli untuk `TR-069 CWMP ACS` (`tr069-mgmt`)
+ * Sesuai persis dengan `pon-onu-mng gpon-onu_1/3/5:4` (SUHANAH) pada running-config:
+ *   flow 2 switch switch_0/1
+ *   flow mode 2 tag-filter vlan-filter untag-filter discard
+ *   flow 2 pri 2 vlan 100
+ *   gemport 2 flow 2
+ *   switchport-bind switch_0/1 iphost 2
+ *   ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable
+ *   vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard
+ *   vlan-filter iphost 2 pri 2 vlan 100
+ *   tr069-mgmt 1 state unlock
+ *   tr069-mgmt 1 acs http://10.69.69.1:14501 validate basic username acsNet password acsNet@2024
+ *   tr069-mgmt 1 tag pri 2 vlan 100
+ */
+export function buildTr069CliLines(params: {
+  enabled?: boolean;
+  acsUrl?: string;
+  acsUsername?: string;
+  acsPassword?: string;
+  vlanId: number;
+  priority?: number;
+  usePrimaryFlow?: boolean;
+  voipSipEnabled?: boolean;
+}): string[] {
+  if (params.enabled === false) {
+    return [
+      `  no tr069-mgmt 1`,
+      `  no vlan-filter iphost 2`,
+      `  no vlan-filter-mode iphost 2`,
+      `  no ip-host 2`,
+      `  no switchport-bind switch_0/1 iphost 2`,
+      `  no gemport 2 flow 2`,
+      `  no flow 2`,
+    ];
+  }
+  const acsUrl = (params.acsUrl || 'http://10.69.69.1:14501').trim();
+  const acsUser = (params.acsUsername || 'acsNet').trim();
+  const acsPass = (params.acsPassword || 'acsNet@2024').trim();
+  const tr069Vlan = params.vlanId > 0 ? params.vlanId : 100;
+  const pri =
+    typeof params.priority === 'number' && params.priority >= 0 && params.priority <= 7
+      ? params.priority
+      : 0;
+
+  if (params.usePrimaryFlow) {
+    // Primary Flow 1 (`iphost 1`) untuk ONU khusus Management / TR-069 tanpa Internet PPPoE
+    return [
+      `  no tr069-mgmt 1`,
+      `  no vlan-filter iphost 1`,
+      `  no vlan-filter-mode iphost 1`,
+      `  no ip-host 1`,
+      `  flow mode 1 tag-filter vlan-filter untag-filter discard`,
+      `  flow 1 pri ${pri} vlan ${tr069Vlan}`,
+      `  gemport 1 flow 1`,
+      `  switchport-bind switch_0/1 iphost 1`,
+      `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`,
+      `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
+      `  vlan-filter iphost 1 pri ${pri} vlan ${tr069Vlan}`,
+      `  tr069-mgmt 1 state unlock`,
+      `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
+      `  tr069-mgmt 1 tag pri ${pri} vlan ${tr069Vlan}`,
+    ];
+  }
+
+  // Secondary Flow 2 (`iphost 2`) untuk TR-069 Management pada ONU `type ALL` sesuai running-config OLT ZTE
+  return [
+    `  no tr069-mgmt 1`,
+    `  no vlan-filter iphost 2`,
+    `  no vlan-filter-mode iphost 2`,
+    `  no ip-host 2`,
+    `  no switchport-bind switch_0/1 iphost 2`,
+    `  no gemport 2 flow 2`,
+    `  no flow 2`,
+    `  flow 2 switch switch_0/1`,
+    `  flow mode 2 tag-filter vlan-filter untag-filter discard`,
+    `  flow 2 pri ${pri} vlan ${tr069Vlan}`,
+    `  gemport 2 flow 2`,
+    `  switchport-bind switch_0/1 iphost 2`,
+    `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
+    `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
+    `  vlan-filter iphost 2 pri ${pri} vlan ${tr069Vlan}`,
+    `  tr069-mgmt 1 state unlock`,
+    `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
+    `  tr069-mgmt 1 tag pri ${pri} vlan ${tr069Vlan}`,
+  ];
+}
+
+/**
+ * 5. ALGORITMA GENERATOR KONFIGURASI OTOMATIS (CLI BUILDER) ZTE C300 / C320
+ * 100% Identik dengan #show running-config nyata user:
+ * - interface gpon-olt_1/3/{port} -> onu {idx} type ALL sn {SN}
+ * - interface gpon-onu_1/3/{port}:{idx} -> name, sn-bind, tcont 1 profile SMARTOLT-1G-UP, gemport 1, service-port 1
+ * - pon-onu-mng gpon-onu_1/3/{port}:{idx} -> flow mode 1, flow 1 pri 0 vlan 101, gemport 1 flow 1,
+ *   switchport-bind switch_0/1 iphost 1, switchport-bind switch_0/1 veip 1,
+ *   pppoe 1 nat enable user <USER> password <PASS>, vlan-filter, dhcp-ip ethuni eth_0/1..8 from-onu, security-mgmt
+ */
+export function generateAuthorizeCliScript(params: CliProvisioningParams): string {
+  const coords = params.ponInterface.replace(/^gpon-olt_/i, ''); // contoh: 1/3/3
+  const oltIf = `gpon-olt_${coords}`;
+  const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
+  const cleanName =
+    params.customerName
+      .replace(/[^a-zA-Z0-9_\-. ]/g, '')
+      .trim()
+      .replace(/\s+/g, '-')
+      .toUpperCase() || `ONU-${params.serialNumber}`;
+  const cleanDesc =
+    params.address &&
+    params.address.trim() &&
+    params.address.trim().toLowerCase() !== 'none'
+      ? params.address
+          .replace(/[^a-zA-Z0-9_\-. ,/]/g, '')
+          .trim()
+          .replace(/\s+/g, '-')
+      : 'none';
+
+  const onuMode: OnuModeOption =
+    params.onuMode || (params.wanMode === 'BRIDGE' ? 'Bridging' : 'Routing');
+  const configMethod: ConfigMethodOption = params.configMethod || 'OMCI';
+  const wanRemoteAccess: WanRemoteAccessOption =
+    params.wanRemoteAccess || 'Enabled from everywhere in the internet';
+
+  // SmartOLT ZTE C300 standard: always register with `type ALL` and 8 ethuni ports
+  // to avoid OMCI Equipment-ID mismatch that blocks PPPoE ME creation on ZTE ONUs.
+  const zteOnuType = 'ALL';
+  const tcontUpProfile =
+    params.tcontProfile && params.tcontProfile.startsWith('SMARTOLT')
+      ? params.tcontProfile
+      : 'SMARTOLT-1G-UP';
+  const trafficDownProfile =
+    params.speedProfile && params.speedProfile.startsWith('SMARTOLT')
+      ? params.speedProfile
+      : 'SMARTOLT-1G-DOWN';
+
+  const isMgmtOnly = Boolean(params.mgmtOnlyNoInternet);
+  const effectiveEnableNat = resolveEffectiveEnableNat({
+    enableNat: params.enableNat,
+    vlanName: params.vlanName,
+    isMgmtOnly,
+  });
+  const mgmtVlanId =
+    params.tr069MgmtVlanId && params.tr069MgmtVlanId > 0
+      ? params.tr069MgmtVlanId
+      : isMgmtOnly
+      ? params.vlanId
+      : 100;
+  const tr069Pri =
+    typeof params.tr069Priority === 'number' ? params.tr069Priority : 2;
+  const mgmtTcontProfile = params.tr069TcontProfile || 'SMARTOLT-VOIPMNG-10M';
+  const mgmtTrafficProfile = params.tr069TrafficProfile || 'SMARTOLT-VOIPMNG-10M';
+
+  const lines: string[] = [
+    `configure terminal`,
+    `interface ${oltIf}`,
+    `  onu ${params.onuIndex} type ${zteOnuType} sn ${params.serialNumber}`,
+    `exit`,
+    `interface ${onuIf}`,
+    `  name ${cleanName}`,
+    `  description ${cleanDesc}`,
+  ];
+
+  if (isMgmtOnly) {
+    // VLAN Mgmt / MJMT: hanya service TR-069 & VoIP saja, tanpa push internet!
+    lines.push(
+      `  tcont 1 profile ${mgmtTcontProfile}`,
+      `  gemport 1 tcont 1`,
+      `  gemport 1 traffic-limit downstream ${mgmtTrafficProfile}`,
+      `  service-port 1 vport 1 user-vlan ${mgmtVlanId} vlan ${mgmtVlanId}`,
+      `exit`,
+      `pon-onu-mng ${onuIf}`,
+      ...buildTr069CliLines({
+        enabled: true,
+        acsUrl: params.tr069AcsUrl,
+        acsUsername: params.tr069AcsUsername,
+        acsPassword: params.tr069AcsPassword,
+        vlanId: mgmtVlanId,
+        priority: tr069Pri,
+        usePrimaryFlow: true,
+        voipSipEnabled: true,
+      }),
+      ...buildWanRemoteAccessCliLines(wanRemoteAccess, params.wanRemoteAllowedSubnet),
+      `exit`,
+      `end`,
+      `write`
+    );
+    return (effectiveEnableNat ? lines : stripNatCommandsFromCliLines(lines)).join('\n');
+  }
+
+  lines.push(`  tcont 1 profile ${tcontUpProfile}`);
+
+  if (configMethod === 'TR069' || params.tr069Enabled) {
+    lines.push(`  tcont 2 profile ${mgmtTcontProfile}`);
+  }
+
+  lines.push(
+    `  gemport 1 tcont 1`,
+    `  gemport 1 traffic-limit downstream ${trafficDownProfile}`
+  );
+
+  if (configMethod === 'TR069' || params.tr069Enabled) {
+    lines.push(
+      `  gemport 2 tcont 2`,
+      `  gemport 2 traffic-limit downstream ${mgmtTrafficProfile}`
+    );
+  }
+
+  lines.push(`  service-port 1 vport 1 user-vlan ${params.vlanId} vlan ${params.vlanId}`);
+
+  if (configMethod === 'TR069' || params.tr069Enabled) {
+    lines.push(`  service-port 2 vport 2 user-vlan ${mgmtVlanId} vlan ${mgmtVlanId}`);
+  }
+
+  lines.push(`exit`, `pon-onu-mng ${onuIf}`);
+
+  lines.push(
+    `  flow mode 1 tag-filter vlan-filter untag-filter discard`,
+    `  flow 1 pri 0 vlan ${params.vlanId}`
+  );
+
+  if (params.hotspotBridgeVlan) {
+    lines.push(`  flow 1 pri 0 vlan ${params.hotspotBridgeVlan}`);
+  }
+
+  lines.push(
+    `  gemport 1 flow 1`,
+    `  switchport-bind switch_0/1 iphost 1`,
+    `  switchport-bind switch_0/1 veip 1`
+  );
+
+  if (onuMode === 'Bridging' || params.wanMode === 'BRIDGE') {
+    lines.push(
+      `  vlan port eth_0/1 mode tag vlan ${params.vlanId}`,
+      `  vlan port eth_0/2 mode tag vlan ${params.vlanId}`,
+      `  vlan port eth_0/3 mode tag vlan ${params.vlanId}`,
+      `  vlan port eth_0/4 mode tag vlan ${params.vlanId}`
+    );
+  } else if (params.wanMode === 'PPPOE') {
+    const rawUser = params.pppoeUsername ? params.pppoeUsername.trim() : cleanName;
+    const user = rawUser.replace(/\s+/g, '-') || cleanName;
+    const pass = (params.pppoePassword || 'jetcyber').trim().replace(/\s+/g, '');
+    const pppoeLine = effectiveEnableNat
+      ? `  pppoe 1 nat enable user ${user} password ${pass}`
+      : `  pppoe 1 user ${user} password ${pass}`;
+    lines.push(
+      pppoeLine,
+      `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
+      `  vlan-filter iphost 1 pri 0 vlan ${params.vlanId}`
+    );
+  } else if (params.wanMode === 'DHCP') {
+    lines.push(
+      `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`,
+      `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
+      `  vlan-filter iphost 1 pri 0 vlan ${params.vlanId}`
+    );
+  } else if (params.wanMode === 'STATIC_IP') {
+    const ip = params.staticIpAddress || '172.16.10.50';
+    const mask = params.staticSubnetMask || '255.255.255.0';
+    const gw = params.staticGateway || '172.16.10.1';
+    lines.push(
+      `  ip-host 1 ip ${ip} mask ${mask} gateway ${gw}`,
+      `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
+      `  vlan-filter iphost 1 pri 0 vlan ${params.vlanId}`
+    );
+  } else {
+    // Setup via ONU Webpage
+    lines.push(
+      `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
+      `  vlan-filter iphost 1 pri 0 vlan ${params.vlanId}`
+    );
+  }
+
+  // SmartOLT standard: configure all 8 ethuni ports (`eth_0/1` .. `eth_0/8`)
+  for (let e = 1; e <= 8; e++) {
+    lines.push(`  dhcp-ip ethuni eth_0/${e} from-onu`);
+  }
+
+  // TR-069 CWMP configuration (Service List: TR069 ONLY, tanpa internet/veip)
+  if (configMethod === 'TR069' || params.tr069Enabled) {
+    lines.push(
+      ...buildTr069CliLines({
+        enabled: true,
+        acsUrl: params.tr069AcsUrl,
+        acsUsername: params.tr069AcsUsername,
+        acsPassword: params.tr069AcsPassword,
+        vlanId: mgmtVlanId,
+        priority: tr069Pri,
+        usePrimaryFlow: false,
+        voipSipEnabled: false,
+      })
+    );
+  }
+
+  // Security management rules (WAN Remote Access + LAN management)
+  lines.push(
+    ...buildWanRemoteAccessCliLines(wanRemoteAccess, params.wanRemoteAllowedSubnet),
+    `exit`,
+    `end`,
+    `write`
+  );
+
+  return (effectiveEnableNat ? lines : stripNatCommandsFromCliLines(lines)).join('\n');
+}
+
+/**
+ * 6. GENERATOR SCRIPT KHUSUS MODAL "Update ONU mode" (Sesuai Sintaks Asli Running-Config)
+ */
+export function generateUpdateOnuModeCliScript(params: {
+  firmwareVersion: 'V2.1.0' | 'V1.2.5P3';
+  ponInterface: string;
+  onuIndex: number;
+  serialNumber: string;
+  customerName?: string;
+  address?: string;
+  rebindTypeAll?: boolean;
+  vlanId: number;
+  onuMode: OnuModeOption;
+  wanMode: WanModeOption;
+  configMethod: ConfigMethodOption;
+  wanRemoteAccess: WanRemoteAccessOption;
+  wanRemoteAllowedSubnet?: string;
+  pppoeUsername?: string;
+  pppoePassword?: string;
+  staticIpAddress?: string;
+  staticSubnetMask?: string;
+  staticGateway?: string;
+  staticDns1?: string;
+  tr069AcsUrl?: string;
+  tr069AcsUsername?: string;
+  tr069AcsPassword?: string;
+  tr069PeriodicInterval?: number;
+  tr069MgmtVlanId?: number;
+  tr069Priority?: number;
+  tr069TcontProfile?: string;
+  tr069TrafficProfile?: string;
+  voipSipEnabled?: boolean;
+  mgmtOnlyNoInternet?: boolean;
+  enableNat?: boolean;
+  vlanName?: string;
+  wifiSsid?: string;
+  wifiPassword?: string;
+}): string {
+  const coords = params.ponInterface.replace(/^gpon-olt_/i, '');
+  const oltIf = `gpon-olt_${coords}`;
+  const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
+  const cleanName =
+    (params.customerName || params.pppoeUsername || params.serialNumber)
+      .replace(/[^a-zA-Z0-9_\-. ]/g, '')
+      .trim()
+      .replace(/\s+/g, '-')
+      .toUpperCase() || params.serialNumber;
+  const cleanDesc =
+    params.address &&
+    params.address.trim() &&
+    params.address.trim().toLowerCase() !== 'none'
+      ? params.address
+          .replace(/[^a-zA-Z0-9_\-. ,/]/g, '')
+          .trim()
+          .replace(/\s+/g, '-')
+      : 'none';
+
+  const isMgmtOnly = Boolean(params.mgmtOnlyNoInternet);
+  const effectiveEnableNat = resolveEffectiveEnableNat({
+    enableNat: params.enableNat,
+    vlanName: params.vlanName,
+    isMgmtOnly,
+  });
+  const mgmtVlanId =
+    params.tr069MgmtVlanId && params.tr069MgmtVlanId > 0
+      ? params.tr069MgmtVlanId
+      : isMgmtOnly
+      ? params.vlanId
+      : 100;
+  const tr069Pri =
+    typeof params.tr069Priority === 'number' ? params.tr069Priority : 2;
+  const mgmtTcontProfile = params.tr069TcontProfile || 'SMARTOLT-VOIPMNG-10M';
+  const mgmtTrafficProfile = params.tr069TrafficProfile || 'SMARTOLT-VOIPMNG-10M';
+
+  const lines: string[] = [`configure terminal`];
+
+  if (isMgmtOnly) {
+    // VLAN Mgmt / MJMT: Service List TR069 ONLY (tanpa internet, tanpa VEIP, tanpa NAT)!
+    if (params.rebindTypeAll) {
+      lines.push(
+        `interface ${oltIf}`,
+        `  no onu ${params.onuIndex}`,
+        `  onu ${params.onuIndex} type ALL sn ${params.serialNumber}`,
+        `exit`
+      );
+    }
+    lines.push(
+      `interface ${onuIf}`,
+      `  name ${cleanName}`,
+      `  description ${cleanDesc}`,
+      `  tcont 1 profile ${mgmtTcontProfile}`,
+      `  gemport 1 tcont 1`,
+      `  gemport 1 traffic-limit downstream ${mgmtTrafficProfile}`,
+      ...(!params.rebindTypeAll ? [`  no service-port 1`, `  no service-port 2`] : []),
+      `  service-port 1 vport 1 user-vlan ${mgmtVlanId} vlan ${mgmtVlanId}`,
+      `exit`,
+      `pon-onu-mng ${onuIf}`,
+      ...(!params.rebindTypeAll ? [`  no pppoe 1`] : []),
+      ...buildTr069CliLines({
+        enabled: true,
+        acsUrl: params.tr069AcsUrl,
+        acsUsername: params.tr069AcsUsername,
+        acsPassword: params.tr069AcsPassword,
+        vlanId: mgmtVlanId,
+        priority: tr069Pri,
+        usePrimaryFlow: true,
+        voipSipEnabled: false,
+      }),
+      ...buildWanRemoteAccessCliLines(
+        params.wanRemoteAccess,
+        params.wanRemoteAllowedSubnet
+      ),
+      `exit`,
+      `end`,
+      `write`
+    );
+    return (effectiveEnableNat ? lines : stripNatCommandsFromCliLines(lines)).join('\n');
+  }
+
+  if (params.rebindTypeAll) {
+    lines.push(
+      `interface ${oltIf}`,
+      `  no onu ${params.onuIndex}`,
+      `  onu ${params.onuIndex} type ALL sn ${params.serialNumber}`,
+      `exit`,
+      `interface ${onuIf}`,
+      `  name ${cleanName}`,
+      `  description ${cleanDesc}`,
+      `  tcont 1 profile SMARTOLT-1G-UP`,
+      `  gemport 1 tcont 1`,
+      `  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN`,
+      `  service-port 1 vport 1 user-vlan ${params.vlanId} vlan ${params.vlanId}`
+    );
+  } else {
+    lines.push(
+      `interface ${onuIf}`,
+      `  name ${cleanName}`,
+      `  description ${cleanDesc}`,
+      `  tcont 1 profile SMARTOLT-1G-UP`,
+      `  gemport 1 tcont 1`,
+      `  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN`,
+      `  no service-port 1`,
+      `  service-port 1 vport 1 user-vlan ${params.vlanId} vlan ${params.vlanId}`
+    );
+  }
+
+  if (params.configMethod === 'TR069') {
+    lines.push(
+      `  tcont 2 profile ${mgmtTcontProfile}`,
+      `  gemport 2 tcont 2`,
+      `  gemport 2 traffic-limit downstream ${mgmtTrafficProfile}`,
+      ...(!params.rebindTypeAll ? [`  no service-port 2`] : []),
+      `  service-port 2 vport 2 user-vlan ${mgmtVlanId} vlan ${mgmtVlanId}`
+    );
+  }
+
+  lines.push(
+    `exit`,
+    `pon-onu-mng ${onuIf}`,
+    `  flow mode 1 tag-filter vlan-filter untag-filter discard`,
+    `  flow 1 pri 0 vlan ${params.vlanId}`,
+    `  gemport 1 flow 1`,
+    `  switchport-bind switch_0/1 iphost 1`,
+    `  switchport-bind switch_0/1 veip 1`
+  );
+
+  if (params.onuMode === 'Bridging') {
+    lines.push(
+      `  no pppoe 1`,
+      `  vlan port eth_0/1 mode tag vlan ${params.vlanId}`,
+      `  vlan port eth_0/2 mode tag vlan ${params.vlanId}`,
+      `  vlan port eth_0/3 mode tag vlan ${params.vlanId}`,
+      `  vlan port eth_0/4 mode tag vlan ${params.vlanId}`
+    );
+  } else {
+    if (params.wanMode === 'PPPOE') {
+      const user =
+        (params.pppoeUsername || cleanName).trim().replace(/\s+/g, '-') || cleanName;
+      const pass = (params.pppoePassword || 'jetcyber').trim().replace(/\s+/g, '');
+      if (!params.rebindTypeAll) {
+        lines.push(`  no pppoe 1`);
+      }
+      const pppoeLine = effectiveEnableNat
+        ? `  pppoe 1 nat enable user ${user} password ${pass}`
+        : `  pppoe 1 user ${user} password ${pass}`;
+      lines.push(
+        pppoeLine,
+        `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
+        `  vlan-filter iphost 1 pri 0 vlan ${params.vlanId}`
+      );
+    } else if (params.wanMode === 'DHCP') {
+      lines.push(
+        `  no pppoe 1`,
+        `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`,
+        `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
+        `  vlan-filter iphost 1 pri 0 vlan ${params.vlanId}`
+      );
+    } else if (params.wanMode === 'STATIC_IP') {
+      lines.push(
+        `  no pppoe 1`,
+        `  ip-host 1 ip ${params.staticIpAddress || '172.16.10.50'} mask ${params.staticSubnetMask || '255.255.255.0'} gateway ${params.staticGateway || '172.16.10.1'}`,
+        `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
+        `  vlan-filter iphost 1 pri 0 vlan ${params.vlanId}`
+      );
+    } else {
+      lines.push(
+        `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
+        `  vlan-filter iphost 1 pri 0 vlan ${params.vlanId}`
+      );
+    }
+
+    for (let e = 1; e <= 8; e++) {
+      lines.push(`  dhcp-ip ethuni eth_0/${e} from-onu`);
+    }
+  }
+
+  if (params.configMethod === 'TR069') {
+    lines.push(
+      ...buildTr069CliLines({
+        enabled: true,
+        acsUrl: params.tr069AcsUrl,
+        acsUsername: params.tr069AcsUsername,
+        acsPassword: params.tr069AcsPassword,
+        vlanId: mgmtVlanId,
+        priority: tr069Pri,
+        usePrimaryFlow: false,
+        voipSipEnabled: params.voipSipEnabled,
+      })
+    );
+  }
+
+  if (params.wifiSsid && params.wifiSsid.trim()) {
+    const cleanSsid = params.wifiSsid.trim().replace(/\s+/g, '_');
+    const cleanWifiPass = (params.wifiPassword || '').trim().replace(/\s+/g, '');
+    lines.push(
+      `  wifi enable`,
+      `  ssid ctrl wifi_0/1 name ${cleanSsid}`
+    );
+    if (cleanWifiPass) {
+      lines.push(
+        `  ssid auth wpa wifi_0/1 wpa2-psk encrypt aes key ${cleanWifiPass}`
+      );
+    }
+  }
+
+  lines.push(
+    ...buildWanRemoteAccessCliLines(
+      params.wanRemoteAccess,
+      params.wanRemoteAllowedSubnet
+    ),
+    `exit`,
+    `end`,
+    `write`
+  );
+
+  return (effectiveEnableNat ? lines : stripNatCommandsFromCliLines(lines)).join('\n');
+}
+
+/**
+ * 6b. GENERATOR CLI ZTE UNTUK KONFIGURASI PROFILE TR-069 + MGMT VLAN DI OLT (SESUAI PARAMETER ISP)
+ */
+export function generateTr069ProfileOltCliScript(params: {
+  profileName: string;
+  acsUrl: string;
+  acsUsername: string;
+  acsPassword: string;
+  mgmtVlanId: number;
+  priority?: number;
+  tcontProfile?: string;
+  trafficProfile?: string;
+  voipEnabled?: boolean;
+  tagToUplinks?: string[];
+}): string {
+  const cleanProfName = params.profileName.trim().replace(/\s+/g, '-') || 'ISP-ACS';
+  const vid = params.mgmtVlanId > 0 ? params.mgmtVlanId : 100;
+  const pri = typeof params.priority === 'number' ? params.priority : 2;
+  const tcont = params.tcontProfile || 'SMARTOLT-VOIPMNG-10M';
+  const traffic = params.trafficProfile || 'SMARTOLT-VOIPMNG-10M';
+  const lines: string[] = [
+    `! TR-069 CWMP Management Profile (${cleanProfName}) — VLAN ${vid} (Service List: TR069 ONLY, No Internet)`,
+    `configure terminal`,
+    `vlan database`,
+    `  vlan ${vid}`,
+    `exit`,
+    `vlan ${vid}`,
+    `  name MGMT_TR069_ONLY`,
+    `exit`,
+    `gpon`,
+    `  profile tcont ${tcont} type 5 fixed 512 assured 1024 maximum 11264`,
+    `  profile traffic ${traffic} sir 10240 pir 11264 cbs 256 pbs 256`,
+    `  onu profile vlan SMARTOLT-vlan${vid} tag-mode tag cvlan ${vid} priority ${pri}`,
+    `exit`,
+  ];
+  if (params.tagToUplinks && params.tagToUplinks.length > 0) {
+    for (const u of params.tagToUplinks) {
+      lines.push(
+        `interface ${u}`,
+        `  switchport mode hybrid`,
+        `  switchport vlan ${vid} tag`,
+        `exit`
+      );
+    }
+  }
+  lines.push(
+    `! Template pon-onu-mng untuk ONU VLAN Mgmt ${vid} (Service List: TR069 ONLY, Tanpa Internet / Tanpa VEIP):`,
+    `!   tr069-mgmt 1 state unlock`,
+    `!   tr069-mgmt 1 acs ${params.acsUrl} validate basic username ${params.acsUsername} password ${params.acsPassword}`,
+    `!   tr069-mgmt 1 tag pri ${pri} vlan ${vid}`,
+    `end`,
+    `write`
+  );
+  return lines.join('\n');
+}
+
+/**
+ * 6c. GENERATOR CLI KHUSUS MODAL "Update attached VLANs" (Multi-VLAN Tanpa Mengubah Setting WAN / PPPoE)
+ * Jika VLAN sudah ada di ONU (`existingVlanIds`), maka VLAN tersebut TIDAK akan di-push ulang.
+ */
+export function generateUpdateAttachedVlansCliScript(params: {
+  ponInterface: string;
+  onuIndex: number;
+  attachedVlanIds: number[];
+  existingVlanIds?: number[];
+  mgmtVlanId?: number | null;
+}): string {
+  const coords = params.ponInterface.replace(/^gpon-olt_/i, '');
+  const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
+  const mgmtVid = params.mgmtVlanId && params.mgmtVlanId > 0 ? params.mgmtVlanId : null;
+
+  const uniqueVlans = Array.from(
+    new Set(
+      params.attachedVlanIds.filter(
+        (v) => Number.isFinite(v) && v > 0 && v !== mgmtVid
+      )
+    )
+  );
+  const existingSet = new Set(
+    (params.existingVlanIds || []).filter(
+      (v) => Number.isFinite(v) && v > 0 && v !== mgmtVid
+    )
+  );
+
+  // Filter hanya VLAN yang BELUM ada di ONU agar VLAN yang sudah ada di ONU tidak di-push ulang
+  const addedVlans = uniqueVlans.filter((v) => !existingSet.has(v));
+  const removedVlans = Array.from(existingSet).filter(
+    (v) => !uniqueVlans.includes(v)
+  );
+
+  // Jika semua VLAN yang dipilih sudah ada di ONU dan tidak ada penghapusan, jangan push config!
+  if (addedVlans.length === 0 && removedVlans.length === 0) {
+    return '';
+  }
+
+  const lines: string[] = [
+    `! Update Attached VLANs — Hanya push VLAN baru (${addedVlans.join(', ') || 'none'}), lewati VLAN yang sudah ada di ONU (${Array.from(existingSet).join(', ') || 'none'})`,
+    `configure terminal`,
+    `interface ${onuIf}`,
+  ];
+
+  // Hitung nomor service-port untuk VLAN tambahan (mulai dari 3 agar service-port 1 WAN & service-port 2 TR069 tidak tersentuh)
+  const keptExistingCount = Array.from(existingSet).filter((v) =>
+    uniqueVlans.includes(v)
+  ).length;
+
+  addedVlans.forEach((vid, idx) => {
+    if (existingSet.size === 0 && idx === 0) {
+      lines.push(`  service-port 1 vport 1 user-vlan ${vid} vlan ${vid}`);
+    } else {
+      const spId = Math.max(3, keptExistingCount + idx + 2);
+      lines.push(`  service-port ${spId} vport 1 user-vlan ${vid} vlan ${vid}`);
+    }
+  });
+
+  lines.push(`exit`, `pon-onu-mng ${onuIf}`);
+
+  if (existingSet.size === 0) {
+    lines.push(`  flow mode 1 tag-filter vlan-filter untag-filter discard`);
+  }
+
+  for (const vid of removedVlans) {
+    lines.push(`  no flow 1 pri 0 vlan ${vid}`);
+  }
+
+  for (const vid of addedVlans) {
+    lines.push(`  flow 1 pri 0 vlan ${vid}`);
+  }
+
+  if (existingSet.size === 0) {
+    lines.push(`  gemport 1 flow 1`);
+  }
+
+  lines.push(`exit`, `end`, `write`);
+  return lines.join('\n');
+}
+
+/**
+ * 6d. GENERATOR CLI KHUSUS MODAL "Update Management and VoIP IP"
+ * Service List untuk VLAN Mgmt diset `TR069` ONLY (Tanpa Internet / Tanpa VEIP / Tanpa NAT)
+ * serta terpisah dari ONU Mode / Tanpa Edit Setting WAN PPPoE.
+ */
+export function generateUpdateMgmtAndTr069CliScript(params: {
+  ponInterface: string;
+  onuIndex: number;
+  tr069Enabled: boolean;
+  tr069Interface: 'MGMT_IP' | 'WAN';
+  acsUrl?: string;
+  acsUsername?: string;
+  acsPassword?: string;
+  mgmtIpMode: 'INACTIVE' | 'STATIC_IP' | 'DHCP';
+  mgmtIpAddress?: string;
+  mgmtSubnetMask?: string;
+  mgmtGateway?: string;
+  keepServicePortActive: boolean;
+  allowRemoteAccessToMgmtIp: boolean;
+  mgmtVlanId: number;
+  wanVlanId?: number;
+  priority?: number;
+  tcontProfile?: string;
+  trafficProfile?: string;
+  voipSipEnabled?: boolean;
+}): string {
+  const coords = params.ponInterface.replace(/^gpon-olt_/i, '');
+  const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
+  const mgmtVlan = params.mgmtVlanId > 0 ? params.mgmtVlanId : 100;
+  const pri =
+    typeof params.priority === 'number' && params.priority >= 0 && params.priority <= 7
+      ? params.priority
+      : 0;
+  const tcont = params.tcontProfile || 'SMARTOLT-VOIPMNG-10M';
+  const traffic = params.trafficProfile || 'SMARTOLT-VOIPMNG-10M';
+  const acsUrl = (params.acsUrl || 'http://10.69.69.1:14501').trim();
+  const acsUser = (params.acsUsername || 'acsNet').trim();
+  const acsPass = (params.acsPassword || 'acsNet@2024').trim();
+
+  const needMgmtServicePort =
+    params.mgmtIpMode !== 'INACTIVE' ||
+    params.keepServicePortActive ||
+    (params.tr069Enabled && params.tr069Interface === 'MGMT_IP');
+
+  const lines: string[] = [
+    `! Update Management & TR069 (${onuIf}) — VLAN ${mgmtVlan} (Tanpa Mengubah Setting WAN PPPoE)`,
+    `configure terminal`,
+    `interface ${onuIf}`,
+  ];
+
+  if (needMgmtServicePort) {
+    lines.push(
+      `  tcont 2 profile ${tcont}`,
+      `  gemport 2 tcont 2`,
+      `  gemport 2 traffic-limit downstream ${traffic}`,
+      `  no service-port 2`,
+      `  service-port 2 vport 2 user-vlan ${mgmtVlan} vlan ${mgmtVlan}`
+    );
+  } else {
+    lines.push(`  no service-port 2`);
+  }
+
+  lines.push(
+    `exit`,
+    `pon-onu-mng ${onuIf}`,
+    `  no tr069-mgmt 1`,
+    `  no vlan-filter iphost 2`,
+    `  no vlan-filter-mode iphost 2`,
+    `  no ip-host 2`,
+    `  no switchport-bind switch_0/1 iphost 2`,
+    `  no gemport 2 flow 2`,
+    `  no flow 2`
+  );
+
+  // Pastikan VLAN Mgmt tidak menempel di flow 1 (Internet VEIP) jika berbeda dengan WAN VLAN
+  if (params.wanVlanId && params.wanVlanId !== mgmtVlan) {
+    lines.push(`  no flow 1 pri 0 vlan ${mgmtVlan}`);
+  }
+
+  if (needMgmtServicePort) {
+    lines.push(
+      `  flow 2 switch switch_0/1`,
+      `  flow mode 2 tag-filter vlan-filter untag-filter discard`,
+      `  flow 2 pri ${pri} vlan ${mgmtVlan}`,
+      `  gemport 2 flow 2`,
+      `  switchport-bind switch_0/1 iphost 2`
+    );
+    if (params.mgmtIpMode === 'STATIC_IP') {
+      const ip = (params.mgmtIpAddress || '10.100.3.8').trim();
+      const mask = (params.mgmtSubnetMask || '255.255.0.0').trim();
+      const gw = (params.mgmtGateway || '10.100.0.1').trim();
+      lines.push(
+        `  ip-host 2 ip ${ip} mask ${mask} gateway ${gw}`,
+        `  mgmt-ip onu-ip ${ip} ${mask} ${pri} mgmt-vlan ${mgmtVlan}`
+      );
+    } else if (
+      params.mgmtIpMode === 'DHCP' ||
+      (params.tr069Enabled && params.tr069Interface === 'MGMT_IP')
+    ) {
+      lines.push(
+        `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`
+      );
+    }
+    lines.push(
+      `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
+      `  vlan-filter iphost 2 pri ${pri} vlan ${mgmtVlan}`
+    );
+  }
+
+  if (params.tr069Enabled) {
+    const trTargetVlan =
+      params.tr069Interface === 'WAN'
+        ? params.wanVlanId || mgmtVlan
+        : mgmtVlan;
+    const trPri = params.tr069Interface === 'WAN' ? 0 : pri;
+    lines.push(
+      `  tr069-mgmt 1 state unlock`,
+      `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
+      `  tr069-mgmt 1 tag pri ${trPri} vlan ${trTargetVlan}`
+    );
+  }
+
+  if (params.allowRemoteAccessToMgmtIp) {
+    lines.push(
+      `  security-mgmt 2 state enable mode forward ingress-type iphost 2 protocol web https telnet ssh snmp`,
+      `  security-mgmt 2 start-src-ip 0.0.0.0 end-src-ip 255.255.255.255`
+    );
+  } else {
+    lines.push(`  no security-mgmt 2`);
+  }
+
+  lines.push(`exit`, `end`, `write`);
+  return lines.join('\n');
+}
+
+/**
+ * 7. GENERATOR PAYLOAD TR-069 CWMP (`SetParameterValues`) UNTUK PROVISIONING VIA ACS
+ */
+export function generateTr069CwmpRpcPreview(params: {
+  serialNumber: string;
+  vlanId: number;
+  onuMode: OnuModeOption;
+  wanMode: WanModeOption;
+  pppoeUsername: string;
+  pppoePassword: string;
+  wanRemoteAccess: WanRemoteAccessOption;
+  acsUrl: string;
+  periodicInterval: number;
+  enableNat?: boolean;
+  wifiSsid?: string;
+  wifiPassword?: string;
+}): string {
+  const remoteEnableBool = params.wanRemoteAccess === 'Disabled' ? 'false' : 'true';
+  const wanNatBool = params.enableNat === false ? 'false' : 'true';
+  const lines = [
+    `# [TR-069 CWMP ACS Task — Device ID: OUI-ZTE-${params.serialNumber}]`,
+    `POST ${params.acsUrl}/devices/ZTE-${params.serialNumber}/tasks?connection_request`,
+    `{`,
+    `  "name": "setParameterValues",`,
+    `  "parameterValues": [`,
+    `    ["InternetGatewayDevice.ManagementServer.PeriodicInformEnable", true, "xsd:boolean"],`,
+    `    ["InternetGatewayDevice.ManagementServer.PeriodicInformInterval", ${params.periodicInterval}, "xsd:unsignedInt"],`,
+    `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANIPConnection.1.X_ZTE-COM_ServiceList", "TR069", "xsd:string"],`,
+    `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANIPConnection.1.NATEnabled", false, "xsd:boolean"],`,
+    `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANIPConnection.1.X_ZTE-COM_LanInterface", "", "xsd:string"],`,
+    `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.X_ZTE-COM_WANEponLinkConfig.VLANIDMark", ${params.vlanId}, "xsd:unsignedInt"],`,
+    `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Enable", ${params.onuMode === 'Routing' ? 'true' : 'false'}, "xsd:boolean"],`,
+    `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.ConnectionType", "${params.onuMode === 'Bridging' ? 'PPPoE_Bridged' : 'IP_Routed'}", "xsd:string"],`,
+    `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.NATEnabled", ${wanNatBool}, "xsd:boolean"],`,
+    `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Username", "${params.pppoeUsername}", "xsd:string"],`,
+    `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Password", "${params.pppoePassword}", "xsd:string"],`,
+    `    ["InternetGatewayDevice.X_ZTE-COM_Security.WanRemoteAccessEnable", ${remoteEnableBool}, "xsd:boolean"],`,
+    `    ["InternetGatewayDevice.X_ZTE-COM_Security.WanHttpEnable", ${remoteEnableBool}, "xsd:boolean"],`,
+    `    ["InternetGatewayDevice.X_ZTE-COM_Security.WanPingRespond", ${remoteEnableBool}, "xsd:boolean"]`,
+  ];
+
+  if (params.wifiSsid) {
+    lines.push(
+      `    ,["InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID", "${params.wifiSsid}", "xsd:string"]`
+    );
+  }
+  if (params.wifiPassword) {
+    lines.push(
+      `    ,["InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.KeyPassphrase", "${params.wifiPassword}", "xsd:string"]`
+    );
+  }
+
+  lines.push(`  ]`, `}`);
+  return lines.join('\n');
+}
+
+export function generateRebootCliScript(ponInterface: string, onuIndex: number): string {
+  const coords = ponInterface.replace(/^gpon-olt_/i, '');
+  const onuIf = `gpon-onu_${coords}:${onuIndex}`;
+  return [
+    `configure terminal`,
+    `pon-onu-mng ${onuIf}`,
+    `  reboot`,
+    `exit`,
+    `end`,
+  ].join('\n');
+}
+
+export function generateFactoryResetCliScript(ponInterface: string, onuIndex: number): string {
+  const coords = ponInterface.replace(/^gpon-olt_/i, '');
+  const onuIf = `gpon-onu_${coords}:${onuIndex}`;
+  return [
+    `configure terminal`,
+    `pon-onu-mng ${onuIf}`,
+    `  restore factory`,
+    `exit`,
+    `end`,
+  ].join('\n');
+}
+
+export function generateUpdatePppoeCliScript(
+  ponInterface: string,
+  onuIndex: number,
+  vlanId: number,
+  pppoeUsername: string,
+  pppoePassword: string,
+  wanRemoteAccess: WanRemoteAccessOption = 'Enabled from everywhere in the internet',
+  enableNat = true
+): string {
+  const coords = ponInterface.replace(/^gpon-olt_/i, '');
+  const onuIf = `gpon-onu_${coords}:${onuIndex}`;
+  const cleanUser = pppoeUsername.trim().replace(/\s+/g, '-');
+  const cleanPass = pppoePassword.trim().replace(/\s+/g, '');
+  const pppoeLine = enableNat
+    ? `  pppoe 1 nat enable user ${cleanUser} password ${cleanPass}`
+    : `  pppoe 1 user ${cleanUser} password ${cleanPass}`;
+  const lines = [
+    `configure terminal`,
+    `interface ${onuIf}`,
+    `  tcont 1 profile SMARTOLT-1G-UP`,
+    `  gemport 1 tcont 1`,
+    `  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN`,
+    `  no service-port 1`,
+    `  service-port 1 vport 1 user-vlan ${vlanId} vlan ${vlanId}`,
+    `exit`,
+    `pon-onu-mng ${onuIf}`,
+    `  flow mode 1 tag-filter vlan-filter untag-filter discard`,
+    `  flow 1 pri 0 vlan ${vlanId}`,
+    `  gemport 1 flow 1`,
+    `  switchport-bind switch_0/1 iphost 1`,
+    `  switchport-bind switch_0/1 veip 1`,
+    `  no pppoe 1`,
+    pppoeLine,
+    `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
+    `  vlan-filter iphost 1 pri 0 vlan ${vlanId}`,
+    `  dhcp-ip ethuni eth_0/1 from-onu`,
+    `  dhcp-ip ethuni eth_0/2 from-onu`,
+    `  dhcp-ip ethuni eth_0/3 from-onu`,
+    `  dhcp-ip ethuni eth_0/4 from-onu`,
+    `  dhcp-ip ethuni eth_0/5 from-onu`,
+    `  dhcp-ip ethuni eth_0/6 from-onu`,
+    `  dhcp-ip ethuni eth_0/7 from-onu`,
+    `  dhcp-ip ethuni eth_0/8 from-onu`,
+    ...buildWanRemoteAccessCliLines(wanRemoteAccess),
+    `exit`,
+    `end`,
+    `write`,
+  ];
+  return (enableNat ? lines : stripNatCommandsFromCliLines(lines)).join('\n');
+}
+
+export function generateDeleteOnuCliScript(ponInterface: string, onuIndex: number): string {
+  const coords = ponInterface.replace(/^gpon-olt_/i, '');
+  const oltIf = `gpon-olt_${coords}`;
+  return [
+    `configure terminal`,
+    `interface ${oltIf}`,
+    `  no onu ${onuIndex}`,
+    `exit`,
+    `end`,
+    `write`,
+  ].join('\n');
+}
+
+/**
+ * Helper Klasifikasi Warna Redaman Optik sesuai Standar FTTH SmartOLT
+ */
+export function classifyOpticalSignal(
+  rxDbm: number | null,
+  phaseState: string
+): {
+  level: 'GOOD' | 'WARNING' | 'CRITICAL' | 'OFFLINE';
+  label: string;
+  badgeClass: string;
+} {
+  if (phaseState === 'LOS' || rxDbm === null || rxDbm <= -38) {
+    return {
+      level: 'CRITICAL',
+      label: phaseState === 'LOS' ? 'LOS (No Light)' : 'No Signal',
+      badgeClass: 'bg-red-600 text-white',
+    };
+  }
+  if (phaseState === 'DyingGasp' || phaseState === 'OffLine') {
+    return {
+      level: 'OFFLINE',
+      label: `${rxDbm.toFixed(2)} dBm (PwrOff)`,
+      badgeClass: 'bg-slate-600 text-white',
+    };
+  }
+  if (rxDbm >= -24.99 && rxDbm <= -8.0) {
+    return {
+      level: 'GOOD',
+      label: `${rxDbm.toFixed(2)} dBm`,
+      badgeClass: 'bg-emerald-600 text-white',
+    };
+  }
+  if (rxDbm >= -27.0 && rxDbm < -24.99) {
+    return {
+      level: 'WARNING',
+      label: `${rxDbm.toFixed(2)} dBm`,
+      badgeClass: 'bg-amber-500 text-slate-950 font-semibold',
+    };
+  }
+  return {
+    level: 'CRITICAL',
+    label: `${rxDbm.toFixed(2)} dBm`,
+    badgeClass: 'bg-red-600 text-white',
+  };
+}
+
+/**
+ * 8. GENERATOR CLI ZTE UNTUK KONFIGURASI PORT UPLINK & TAG VLAN KE UPLINK
+ * Sesuai persis dengan `interface xgei_1/19/1` & `interface gei_1/19/3` di running-config:
+ *   interface gei_1/19/3
+ *     no shutdown
+ *     hybrid-attribute fiber
+ *     negotiation auto
+ *     flowcontrol disable
+ *     linktrap enable
+ *     switchport mode hybrid
+ *     switchport default vlan 41
+ *     switchport vlan 100-102 tag
+ *     port-protect disable
+ *     uplink-isolate disable
+ */
+export function generateUplinkConfigCliScript(params: {
+  uplinkName: string; // contoh: gei_1/19/3 atau xgei_1/19/1
+  description: string;
+  adminState: 'Enabled' | 'Disabled';
+  portMode: 'Hybrid' | 'Trunk' | 'Access';
+  pvidUntag: number;
+  taggedVlans: string; // contoh: "100-102" atau "100-102,111,120"
+  mtu: number;
+}): string {
+  const modeLower = params.portMode.toLowerCase();
+  const cleanVlans =
+    params.taggedVlans.replace(/^(Hybrid|Trunk|Access):\s*/i, '').trim() || '100-102';
+  const is10G = params.uplinkName.startsWith('xgei');
+
+  const lines = [
+    `configure terminal`,
+    `eth-switch max-frame-length ${params.mtu || 1600}`,
+    `interface ${params.uplinkName}`,
+  ];
+
+  if (is10G) {
+    lines.push(`  phy-attribute lan`);
+  }
+  lines.push(
+    params.adminState === 'Enabled' ? `  no shutdown` : `  shutdown`,
+    `  hybrid-attribute fiber`,
+    is10G ? `  no negotiation auto` : `  negotiation auto`
+  );
+  if (is10G) {
+    lines.push(`  speed 10000`, `  duplex full`);
+  }
+  if (params.description && params.description.trim()) {
+    lines.push(`  description ${params.description.trim()}`);
+  }
+  lines.push(
+    `  flowcontrol disable`,
+    `  linktrap enable`,
+    `  switchport mode ${modeLower}`,
+    `  switchport default vlan ${params.pvidUntag || 41}`
+  );
+
+  if (params.portMode !== 'Access' && cleanVlans) {
+    lines.push(`  switchport vlan ${cleanVlans} tag`);
+  }
+
+  lines.push(
+    `  port-protect disable`,
+    `  uplink-isolate disable`,
+    `exit`,
+    `end`,
+    `write`
+  );
+  return lines.join('\n');
+}
+
+/**
+ * 9. GENERATOR CLI ZTE UNTUK PEMBUATAN VLAN BARU (+ OPSIONAL TAG OTOMATIS KE UPLINK)
+ * Sesuai persis dengan `vlan database`, `vlan <id>`, `gpon -> onu profile vlan SMARTOLT-vlan<id>` di running-config!
+ */
+export function generateCreateVlanCliScript(params: {
+  vlanIds: number[];
+  descriptionPrefix: string;
+  tagToUplinks: string[]; // contoh: ['gei_1/19/3', 'xgei_1/19/1']
+  dhcpSnooping?: boolean;
+}): string {
+  const vlanCsv = params.vlanIds.join(',');
+  const lines = [
+    `configure terminal`,
+    `vlan database`,
+    `  vlan ${vlanCsv}`,
+    `exit`,
+  ];
+
+  for (const vid of params.vlanIds) {
+    const vName =
+      params.vlanIds.length === 1
+        ? (params.descriptionPrefix || `VLAN_${vid}`).replace(/\s+/g, '_')
+        : `${(params.descriptionPrefix || 'VLAN').replace(/\s+/g, '_')}_${vid}`;
+    lines.push(`vlan ${vid}`, `  name ${vName}`, `exit`);
+  }
+
+  lines.push(`gpon`);
+  for (const vid of params.vlanIds) {
+    lines.push(`  onu profile vlan SMARTOLT-vlan${vid} tag-mode tag cvlan ${vid}`);
+  }
+  lines.push(`exit`);
+
+  if (params.dhcpSnooping) {
+    lines.push(`ip dhcp snooping control-port enable`);
+  }
+
+  if (params.tagToUplinks.length > 0) {
+    for (const uplinkIf of params.tagToUplinks) {
+      lines.push(
+        `interface ${uplinkIf}`,
+        `  switchport mode hybrid`,
+        `  switchport vlan ${vlanCsv} tag`,
+        `exit`
+      );
+    }
+  }
+
+  lines.push(`end`, `write`);
+  return lines.join('\n');
+}
+
+/**
+ * 10. GENERATOR CLI ZTE UNTUK KONFIGURASI PORT ETHERNET ONU (eth_0/1 .. eth_0/8)
+ * Sesuai persis dengan `onu-pnp -> onu-uni-vlan` & `pon-onu-mng -> dhcp-ip ethuni` di running-config!
+ */
+export function generateOnuEthPortCliScript(params: {
+  ponInterface: string;
+  onuIndex: number;
+  ethPort: string; // eth_0/1
+  adminState: 'Unlocked' | 'Locked';
+  mode: 'LAN' | 'Tag VLAN' | 'Transparent';
+  vlanId: number;
+  dhcpMode: 'From ONU' | 'From Internet';
+}): string {
+  const coords = params.ponInterface.replace(/^gpon-olt_/i, '');
+  const oltIf = `gpon-olt_${coords}`;
+  const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
+  const lines = [`configure terminal`];
+
+  if (params.mode === 'Tag VLAN') {
+    lines.push(
+      `onu-pnp`,
+      `  onu-uni-vlan ${oltIf} ${params.ethPort} mode tag vlan ${params.vlanId}`,
+      `exit`
+    );
+  }
+
+  lines.push(
+    `pon-onu-mng ${onuIf}`,
+    params.adminState === 'Unlocked'
+      ? `  interface eth ${params.ethPort} state unlock`
+      : `  interface eth ${params.ethPort} state lock`
+  );
+
+  if (params.mode === 'Tag VLAN') {
+    lines.push(`  flow 1 pri 0 vlan ${params.vlanId}`);
+  } else if (params.mode === 'Transparent') {
+    lines.push(`  vlan port ${params.ethPort} mode transparent`);
+  }
+
+  lines.push(
+    params.dhcpMode === 'From Internet'
+      ? `  dhcp-ip ethuni ${params.ethPort} from-internet`
+      : `  dhcp-ip ethuni ${params.ethPort} from-onu`,
+    `exit`,
+    `end`,
+    `write`
+  );
+  return lines.join('\n');
+}
+
+/**
+ * 11. PARSER `#show running-config` ASLI ZTE C300 / C320
+ * Membaca seluruh konfigurasi berjalan dari OLT (VLANs, Uplink Tagged VLANs, Registered ONUs, PPPoE Users, TR-069)
+ */
+export interface ParsedRunningConfigOnu {
+  board: number;
+  port: number;
+  onuIndex: number;
+  onuType: string;
+  serialNumber: string;
+  name: string;
+  description: string;
+  tcontProfile: string;
+  trafficProfile: string;
+  vlanId: number;
+  extraFlowVlans: number[];
+  pppoeUsername: string | null;
+  pppoePassword: string | null;
+  natEnabled?: boolean;
+  tr069Enabled: boolean;
+  tr069AcsUrl: string | null;
+  tr069VlanId?: number | null;
+  voipEnabled?: boolean;
+  wanRemoteRestrictedIp: string | null;
+}
+
+export interface ParsedOltCard {
+  slot: number;
+  type: string;
+  realType: string;
+  ports: number | null;
+  swVersion: string;
+  status: 'Online' | 'Standby' | 'Offline';
+  role: 'Main' | 'Standby';
+}
+
+export interface ParsedRunningConfigSummary {
+  hostname: string | null;
+  vlans: { vlanId: number; name: string }[];
+  cards: ParsedOltCard[];
+  tcontProfiles: {
+    name: string;
+    type: number;
+    fixedKbps: number;
+    assuredKbps: number;
+    maxKbps: number;
+  }[];
+  trafficProfiles: {
+    name: string;
+    sirKbps: number;
+    pirKbps: number;
+  }[];
+  uplinks: {
+    name: string;
+    pvidUntag: number;
+    taggedVlans: string;
+    speed: string;
+    adminState: 'Enabled' | 'Disabled';
+  }[];
+  onus: ParsedRunningConfigOnu[];
+}
+
+export function parseZteCardOutput(rawText: string): ParsedOltCard[] {
+  const cardsMap = new Map<number, ParsedOltCard>();
+
+  // 1. From `add-card rackno 1 shelfno 1 slotno 3 GTGH` in running-config
+  const addCardRegex = /add-card\s+rackno\s+\d+\s+shelfno\s+\d+\s+slotno\s+(\d+)\s+(\S+)/gi;
+  let acm: RegExpExecArray | null;
+  while ((acm = addCardRegex.exec(rawText)) !== null) {
+    const slot = parseInt(acm[1], 10);
+    const ctype = acm[2].trim().toUpperCase();
+    cardsMap.set(slot, {
+      slot,
+      type: ctype,
+      realType: ctype,
+      ports: ctype.startsWith('GTG') ? 16 : ctype.startsWith('GTXO') ? 8 : ctype.startsWith('HUV') ? 4 : null,
+      swVersion: 'V2.1.0',
+      status: 'Online',
+      role: 'Main',
+    });
+  }
+
+  // 2. From `show card` output:
+  // 1    1     3    GTGH    GTGH     16     V1.0.0  V2.1.0          Insigh
+  const showCardRegex =
+    /^\s*\d+\s+\d+\s+(\d+)\s+([A-Z0-9]{3,8})\s+([A-Z0-9]{3,8})?\s*(\d+)?\s*(?:V[\d.]+\s+)?(V[\d.P]+)?\s*(Insigh|Inservice|Online|Standby|Offline)/gim;
+  let scm: RegExpExecArray | null;
+  while ((scm = showCardRegex.exec(rawText)) !== null) {
+    const slot = parseInt(scm[1], 10);
+    const cfgType = scm[2].toUpperCase();
+    const realType = (scm[3] || cfgType).toUpperCase();
+    const ports = scm[4] ? parseInt(scm[4], 10) : cfgType.startsWith('GTG') ? 16 : null;
+    const swVer = scm[5] || 'V2.1.0';
+    const rawStat = (scm[6] || 'Online').toLowerCase();
+    const status: ParsedOltCard['status'] =
+      rawStat === 'offline' ? 'Offline' : rawStat === 'standby' ? 'Standby' : 'Online';
+    cardsMap.set(slot, {
+      slot,
+      type: cfgType,
+      realType,
+      ports: ports === 0 ? null : ports,
+      swVersion: swVer,
+      status,
+      role: status === 'Standby' ? 'Standby' : 'Main',
+    });
+  }
+
+  return Array.from(cardsMap.values()).sort((a, b) => a.slot - b.slot);
+}
+
+function expandVlanSpecToNumbers(spec: string): number[] {
+  const nums: number[] = [];
+  const parts = spec.split(',');
+  for (const p of parts) {
+    const token = p.trim();
+    if (!token) continue;
+    if (token.includes('-')) {
+      const [s, e] = token.split('-').map((n) => parseInt(n.trim(), 10));
+      if (!isNaN(s) && !isNaN(e) && s <= e && e - s <= 500) {
+        for (let v = s; v <= e; v++) nums.push(v);
+      }
+    } else {
+      const v = parseInt(token, 10);
+      if (!isNaN(v) && v >= 1 && v <= 4094) nums.push(v);
+    }
+  }
+  return nums;
+}
+
+export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConfigSummary {
+  const rawConfig = cleanZteCliText(rawInputConfig);
+  const vlansMap = new Map<number, string>();
+  const uplinks: ParsedRunningConfigSummary['uplinks'] = [];
+  const onuMap = new Map<string, ParsedRunningConfigOnu>();
+  const tcontProfiles: ParsedRunningConfigSummary['tcontProfiles'] = [];
+  const trafficProfiles: ParsedRunningConfigSummary['trafficProfiles'] = [];
+
+  const hostMatch = rawConfig.match(/^\s*hostname\s+(\S+)/m);
+  const hostname = hostMatch ? hostMatch[1].trim() : null;
+
+  // 1. Parse `vlan database`
+  const vlanDbRegex = /vlan database([\s\S]*?)!/g;
+  let vdb: RegExpExecArray | null;
+  while ((vdb = vlanDbRegex.exec(rawConfig)) !== null) {
+    const vlanLines = vdb[1].split(/\r?\n/);
+    for (const l of vlanLines) {
+      const m = l.trim().match(/^vlan\s+(.+)$/i);
+      if (m) {
+        for (const v of expandVlanSpecToNumbers(m[1])) {
+          if (!vlansMap.has(v)) vlansMap.set(v, `VLAN_${v}`);
+        }
+      }
+    }
+  }
+
+  // 1b. Parse `onu profile vlan <name> tag-mode tag cvlan <id>`
+  const gponVlanProfRegex = /onu\s+profile\s+vlan\s+(\S+)\s+tag-mode\s+\S+\s+cvlan\s+(\d+)/gi;
+  let gvp: RegExpExecArray | null;
+  while ((gvp = gponVlanProfRegex.exec(rawConfig)) !== null) {
+    const profName = gvp[1].trim();
+    const vid = parseInt(gvp[2], 10);
+    if (!isNaN(vid) && !vlansMap.has(vid)) {
+      vlansMap.set(vid, profName.replace(/^SMARTOLT-vlan/i, 'VLAN_'));
+    }
+  }
+
+  // 2. Parse named `vlan <id>` blocks
+  const namedVlanRegex = /^vlan\s+(\d+)\r?\n\s+name\s+([^\r\n!]+)/gm;
+  let vm: RegExpExecArray | null;
+  while ((vm = namedVlanRegex.exec(rawConfig)) !== null) {
+    const vid = parseInt(vm[1], 10);
+    const vname = vm[2].trim();
+    vlansMap.set(vid, vname);
+  }
+
+  // 2b. Parse GPON TCONT & Traffic profiles
+  const tcontProfRegex =
+    /profile\s+tcont\s+(\S+)\s+type\s+(\d+)(?:\s+fixed\s+(\d+))?(?:\s+assured\s+(\d+))?\s+maximum\s+(\d+)/gi;
+  let tcp: RegExpExecArray | null;
+  while ((tcp = tcontProfRegex.exec(rawConfig)) !== null) {
+    tcontProfiles.push({
+      name: tcp[1].trim(),
+      type: parseInt(tcp[2], 10),
+      fixedKbps: tcp[3] ? parseInt(tcp[3], 10) : 0,
+      assuredKbps: tcp[4] ? parseInt(tcp[4], 10) : 0,
+      maxKbps: parseInt(tcp[5], 10),
+    });
+  }
+
+  const trafficProfRegex = /profile\s+traffic\s+(\S+)\s+sir\s+(\d+)\s+pir\s+(\d+)/gi;
+  let trp: RegExpExecArray | null;
+  while ((trp = trafficProfRegex.exec(rawConfig)) !== null) {
+    trafficProfiles.push({
+      name: trp[1].trim(),
+      sirKbps: parseInt(trp[2], 10),
+      pirKbps: parseInt(trp[3], 10),
+    });
+  }
+
+  // 3. Parse `interface gpon-olt_1/x/y` for ONU registrations
+  // Note: Only terminate on top-level block boundaries (`!`, `end`, `interface gpon-...`, `pon-onu-mng`)
+  const oltBlockRegex =
+    /interface\s+gpon-olt_(\d+)\/(\d+)\/(\d+)([\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|$)/gim;
+  let ob: RegExpExecArray | null;
+  while ((ob = oltBlockRegex.exec(rawConfig)) !== null) {
+    const board = parseInt(ob[2], 10);
+    const port = parseInt(ob[3], 10);
+    const body = ob[4];
+    const onuLineRegex =
+      /^\s*onu\s+(\d+)\s+type\s+(\S+)\s+(?:sn|mac)\s+([A-Za-z0-9.\-:]+)/gim;
+    let ol: RegExpExecArray | null;
+    while ((ol = onuLineRegex.exec(body)) !== null) {
+      const onuIndex = parseInt(ol[1], 10);
+      const snClean = ol[3].trim().replace(/^SN:/i, '').toUpperCase();
+      const key = `1/${board}/${port}:${onuIndex}`;
+      const prev = onuMap.get(key);
+      onuMap.set(key, {
+        board,
+        port,
+        onuIndex,
+        onuType: ol[2].trim(),
+        serialNumber: snClean,
+        name:
+          prev && !prev.name.startsWith('ONU-')
+            ? prev.name
+            : `ONU-${snClean}`,
+        description: prev?.description || 'none',
+        tcontProfile: prev?.tcontProfile || 'SMARTOLT-1G-UP',
+        trafficProfile: prev?.trafficProfile || 'SMARTOLT-1G-DOWN',
+        vlanId: prev?.vlanId || 101,
+        extraFlowVlans: prev?.extraFlowVlans || [],
+        pppoeUsername: prev?.pppoeUsername || null,
+        pppoePassword: prev?.pppoePassword || null,
+        tr069Enabled: prev?.tr069Enabled || false,
+        tr069AcsUrl: prev?.tr069AcsUrl || null,
+        wanRemoteRestrictedIp: prev?.wanRemoteRestrictedIp || null,
+      });
+    }
+  }
+
+  // 3b. Also merge any `show gpon onu baseinfo` rows if present in rawConfig
+  const baseinfoMap = parseZteOnuBaseinfoOutput(rawConfig);
+  for (const [key, bi] of baseinfoMap.entries()) {
+    const existing = onuMap.get(key);
+    if (!existing) {
+      onuMap.set(key, {
+        board: bi.board,
+        port: bi.port,
+        onuIndex: bi.onuIndex,
+        onuType: bi.onuType,
+        serialNumber: bi.serialNumber,
+        name: `ONU-${bi.serialNumber}`,
+        description: 'none',
+        tcontProfile: 'SMARTOLT-1G-UP',
+        trafficProfile: 'SMARTOLT-1G-DOWN',
+        vlanId: 101,
+        extraFlowVlans: [],
+        pppoeUsername: null,
+        pppoePassword: null,
+        tr069Enabled: false,
+        tr069AcsUrl: null,
+        wanRemoteRestrictedIp: null,
+      });
+    } else if (existing.serialNumber.startsWith('ONU-')) {
+      existing.serialNumber = bi.serialNumber;
+      if (existing.name.startsWith('ONU-')) {
+        existing.name = `ONU-${bi.serialNumber}`;
+      }
+      if (!existing.onuType || existing.onuType === 'ALL') {
+        existing.onuType = bi.onuType;
+      }
+    }
+  }
+
+  // 4. Parse `interface gpon-onu_1/x/y:z` (also auto-create entry if oltBlock was not in snippet)
+  const onuIfRegex =
+    /interface\s+gpon-onu_(\d+)\/(\d+)\/(\d+):(\d+)([\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|$)/gim;
+  let oib: RegExpExecArray | null;
+  while ((oib = onuIfRegex.exec(rawConfig)) !== null) {
+    const board = parseInt(oib[2], 10);
+    const port = parseInt(oib[3], 10);
+    const onuIndex = parseInt(oib[4], 10);
+    const key = `${oib[1]}/${board}/${port}:${onuIndex}`;
+    let existing = onuMap.get(key);
+    if (!existing) {
+      existing = {
+        board,
+        port,
+        onuIndex,
+        onuType: 'ALL',
+        serialNumber: `ONU-${board}-${port}-${onuIndex}`,
+        name: `ONU-${board}-${port}-${onuIndex}`,
+        description: 'none',
+        tcontProfile: 'SMARTOLT-1G-UP',
+        trafficProfile: 'SMARTOLT-1G-DOWN',
+        vlanId: 101,
+        extraFlowVlans: [],
+        pppoeUsername: null,
+        pppoePassword: null,
+        tr069Enabled: false,
+        tr069AcsUrl: null,
+        wanRemoteRestrictedIp: null,
+      };
+      onuMap.set(key, existing);
+    }
+    const body = oib[5];
+    const snBindMatch = body.match(/sn-bind\s+enable\s+sn\s+([A-Za-z0-9]+)/i);
+    if (snBindMatch && existing.serialNumber.startsWith('ONU-')) {
+      existing.serialNumber = snBindMatch[1].trim().toUpperCase();
+    }
+    const nameMatch = body.match(/^\s*name\s+([^\r\n]+)/m);
+    if (nameMatch) existing.name = nameMatch[1].trim();
+    const descMatch = body.match(/^\s*description\s+([^\r\n]+)/m);
+    if (descMatch) existing.description = descMatch[1].trim();
+    const tcontMatch = body.match(/tcont\s+1\s+profile\s+(\S+)/);
+    if (tcontMatch) existing.tcontProfile = tcontMatch[1].trim();
+    const trafficMatch = body.match(/gemport\s+1\s+traffic-limit\s+downstream\s+(\S+)/);
+    if (trafficMatch) existing.trafficProfile = trafficMatch[1].trim();
+    const spMatch = body.match(
+      /service-port\s+\d+\s+vport\s+\d+\s+user-vlan\s+(\d+)\s+vlan\s+(\d+)/
+    );
+    if (spMatch) {
+      const svlan = parseInt(spMatch[2], 10);
+      existing.vlanId = svlan;
+      if (!vlansMap.has(svlan)) {
+        vlansMap.set(svlan, svlan === 101 ? 'PPPOE' : `VLAN_${svlan}`);
+      }
+    }
+  }
+
+  // 5. Parse `pon-onu-mng gpon-onu_1/x/y:z`
+  // IMPORTANT: Do NOT terminate on `interface eth` or `interface wifi` inside `pon-onu-mng`,
+  // and do NOT terminate on `end-src-ip`!
+  const mngRegex =
+    /pon-onu-mng\s+gpon-onu_(\d+)\/(\d+)\/(\d+):(\d+)([\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|$)/gim;
+  let mb: RegExpExecArray | null;
+  while ((mb = mngRegex.exec(rawConfig)) !== null) {
+    const board = parseInt(mb[2], 10);
+    const port = parseInt(mb[3], 10);
+    const onuIndex = parseInt(mb[4], 10);
+    const key = `${mb[1]}/${board}/${port}:${onuIndex}`;
+    let existing = onuMap.get(key);
+    if (!existing) {
+      existing = {
+        board,
+        port,
+        onuIndex,
+        onuType: 'ALL',
+        serialNumber: `ONU-${board}-${port}-${onuIndex}`,
+        name: `ONU-${board}-${port}-${onuIndex}`,
+        description: 'none',
+        tcontProfile: 'SMARTOLT-1G-UP',
+        trafficProfile: 'SMARTOLT-1G-DOWN',
+        vlanId: 101,
+        extraFlowVlans: [],
+        pppoeUsername: null,
+        pppoePassword: null,
+        tr069Enabled: false,
+        tr069AcsUrl: null,
+        wanRemoteRestrictedIp: null,
+      };
+      onuMap.set(key, existing);
+    }
+    const body = mb[5];
+    const pppoeNatMatch = body.match(
+      /pppoe(?:\s+\d+)?\s+nat\s+enable\s+user\s+(\S+)\s+password\s+(\S+)/i
+    );
+    const pppoeNoNatMatch = body.match(
+      /pppoe(?:\s+\d+)?\s+user\s+(\S+)\s+password\s+(\S+)/i
+    );
+    const pppoeMatch = pppoeNatMatch || pppoeNoNatMatch;
+    if (pppoeMatch) {
+      existing.pppoeUsername = pppoeMatch[1].trim();
+      existing.pppoePassword = pppoeMatch[2].trim();
+      existing.natEnabled = Boolean(pppoeNatMatch);
+    }
+    const flowRegex = /flow\s+1\s+pri\s+\d+\s+vlan\s+(\d+)/g;
+    let fm: RegExpExecArray | null;
+    while ((fm = flowRegex.exec(body)) !== null) {
+      const fVlan = parseInt(fm[1], 10);
+      if (!vlansMap.has(fVlan)) {
+        vlansMap.set(fVlan, `VLAN_${fVlan}`);
+      }
+      if (fVlan !== existing.vlanId && !existing.extraFlowVlans.includes(fVlan)) {
+        existing.extraFlowVlans.push(fVlan);
+      }
+    }
+    const vlanPortMatch = body.match(/vlan\s+port\s+eth_0\/1\s+mode\s+tag\s+vlan\s+(\d+)/i);
+    if (vlanPortMatch && existing.vlanId === 101) {
+      const bVlan = parseInt(vlanPortMatch[1], 10);
+      if (!isNaN(bVlan)) {
+        existing.vlanId = bVlan;
+        if (!vlansMap.has(bVlan)) vlansMap.set(bVlan, `VLAN_${bVlan}`);
+      }
+    }
+    const trMatch = body.match(/tr069-mgmt\s+1\s+acs\s+(\S+)/);
+    if (trMatch) {
+      existing.tr069Enabled = true;
+      existing.tr069AcsUrl = trMatch[1].trim();
+    }
+    const trTagMatch = body.match(/tr069-mgmt\s+1\s+tag\s+pri\s+\d+\s+vlan\s+(\d+)/i);
+    if (trTagMatch) {
+      existing.tr069VlanId = parseInt(trTagMatch[1], 10);
+    }
+    if (/voip\s+protocol\s+sip/i.test(body)) {
+      existing.voipEnabled = true;
+    }
+    const secIpMatch = body.match(/security-mgmt\s+10\s+start-src-ip\s+(\S+)/);
+    if (secIpMatch) {
+      existing.wanRemoteRestrictedIp = secIpMatch[1].trim();
+    }
+  }
+
+  // 5b. Also merge any `show gpon onu detail-info` blocks if present in rawConfig
+  const multiDetails = parseZteMultiOnuDetailInfo(rawConfig);
+  for (const [fullIf, det] of multiDetails.entries()) {
+    const m = fullIf.match(/(\d+)\/(\d+)\/(\d+):(\d+)/);
+    if (!m) continue;
+    const board = parseInt(m[2], 10);
+    const port = parseInt(m[3], 10);
+    const onuIndex = parseInt(m[4], 10);
+    const key = `1/${board}/${port}:${onuIndex}`;
+    let existing = onuMap.get(key);
+    if (!existing) {
+      existing = {
+        board,
+        port,
+        onuIndex,
+        onuType: 'ALL',
+        serialNumber: det.serialNumber || `ONU-${board}-${port}-${onuIndex}`,
+        name: det.name || det.serialNumber || `ONU-${board}-${port}-${onuIndex}`,
+        description: 'none',
+        tcontProfile: 'SMARTOLT-1G-UP',
+        trafficProfile: 'SMARTOLT-1G-DOWN',
+        vlanId: 101,
+        extraFlowVlans: [],
+        pppoeUsername: null,
+        pppoePassword: null,
+        tr069Enabled: false,
+        tr069AcsUrl: null,
+        wanRemoteRestrictedIp: null,
+      };
+      onuMap.set(key, existing);
+    } else {
+      if (det.serialNumber && existing.serialNumber.startsWith('ONU-')) {
+        existing.serialNumber = det.serialNumber;
+      }
+      if (det.name && existing.name.startsWith('ONU-')) {
+        existing.name = det.name;
+      }
+    }
+  }
+
+  // 6. Parse Uplink interfaces (`xgei_1/19/1`, `gei_1/19/3`, etc.)
+  const uplinkRegex =
+    /interface\s+((?:x?gei)_\d+\/\d+\/\d+)([\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+|$)/gim;
+  let ub: RegExpExecArray | null;
+  while ((ub = uplinkRegex.exec(rawConfig)) !== null) {
+    const name = ub[1].trim();
+    const body = ub[2];
+    const pvidM = body.match(/switchport\s+default\s+vlan\s+(\d+)/);
+    const tagM = body.match(/switchport\s+vlan\s+([^\r\n]+?)\s+tag/);
+    const isShutdown = /^\s*shutdown\b/m.test(body) && !/^\s*no\s+shutdown\b/m.test(body);
+    if (tagM) {
+      for (const tv of expandVlanSpecToNumbers(tagM[1].trim())) {
+        if (!vlansMap.has(tv)) vlansMap.set(tv, `VLAN_${tv}`);
+      }
+    }
+    uplinks.push({
+      name,
+      pvidUntag: pvidM ? parseInt(pvidM[1], 10) : 41,
+      taggedVlans: `Hybrid: ${tagM ? tagM[1].trim() : '102'}`,
+      speed: name.startsWith('xgei') ? 'Forced 10G-FullD' : 'Auto',
+      adminState: isShutdown ? 'Disabled' : 'Enabled',
+    });
+  }
+
+  const cards = parseZteCardOutput(rawConfig);
+
+  return {
+    hostname,
+    vlans: Array.from(vlansMap.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([vlanId, name]) => ({
+        vlanId,
+        name,
+      })),
+    cards,
+    tcontProfiles,
+    trafficProfiles,
+    uplinks,
+    onus: Array.from(onuMap.values()),
+  };
+}
+
