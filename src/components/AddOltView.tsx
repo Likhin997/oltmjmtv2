@@ -125,7 +125,7 @@ export const AddOltView: React.FC<AddOltViewProps> = ({ onBack, onSaveOlt }) => 
           ok: false,
           steps: [
             `[TCP Socket Test] Host ${targetHost}:${tcpPort} — ${data.error || 'Unreachable from current container network'}`,
-            `Note: If ${targetHost} is on a local/VPN subnet, run this app in your local Docker container (port 3004) or click Save to register OLT in Database.`,
+            `Note: If ${targetHost} is on a local/VPN subnet, run this app in your local Docker container (port 3006) or click Save to register OLT in Database.`,
           ],
         });
       }

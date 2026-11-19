@@ -17,12 +17,12 @@ RUN npm run build
 RUN mkdir -p /app/data
 
 ENV NODE_ENV=production
-ENV PORT=3004
+ENV PORT=3006
 ENV PG_HOST=localhost
-ENV PG_PORT=5435
+ENV PG_PORT=5436
 ENV PG_USER=likhin
 ENV PG_DATABASE=smartolt_db
 
-EXPOSE 3004
+EXPOSE 3006
 
 CMD ["npx", "tsx", "server.ts"]

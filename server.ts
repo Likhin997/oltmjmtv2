@@ -110,7 +110,7 @@ function isValidTcpPort(port: unknown): boolean {
 }
 
 // ============================================================================
-// 1. POSTGRESQL CONNECTION CONFIG (Default: localhost:5435, user: likhin)
+// 1. POSTGRESQL CONNECTION CONFIG (Default: localhost:5436, user: likhin)
 // ============================================================================
 export interface PgConnectionConfig {
   host: string;
@@ -122,7 +122,7 @@ export interface PgConnectionConfig {
 
 let currentPgConfig: PgConnectionConfig = {
   host: process.env.PG_HOST || 'localhost',
-  port: Number(process.env.PG_PORT || 5435),
+  port: Number(process.env.PG_PORT || 5436),
   user: process.env.PG_USER || 'likhin',
   password: process.env.PG_PASSWORD || '11013009',
   database: process.env.PG_DATABASE || 'smartolt_db',
@@ -133,7 +133,7 @@ let activeDbEngine = `PostgreSQL (${currentPgConfig.host}:${currentPgConfig.port
 let pgConnected = false;
 let pgLastError: string | null = null;
 
-// Local SQLite fallback when running inside cloud preview where user's localhost:5435 is not present.
+// Local SQLite fallback when running inside cloud preview where user's localhost:5436 is not present.
 // When running inside the AI Studio workspace (/app/applet), store runtime SQLite files in /tmp
 // so binary .sqlite / .sqlite-shm / .sqlite-wal files are never committed to GitHub.
 const isAiStudioWorkspace = process.cwd() === '/app/applet';
@@ -534,7 +534,7 @@ async function initPostgresConnection(cfg: PgConnectionConfig): Promise<{
 }> {
   currentPgConfig = cfg;
 
-  // Inside Docker, localhost:5435 on the host or the dedicated smartolt-postgres container (port 5435)
+  // Inside Docker, localhost:5436 on the host or the dedicated smartolt-postgres container (port 5436)
   // is probed automatically when user configures localhost / 127.0.0.1 / host.docker.internal.
   const isLocalTarget = [
     'localhost',
@@ -4271,7 +4271,7 @@ app.get('/api/state', async (req, res) => {
             }
           : undefined,
         pgLastError: isSuperadminRole(authUser?.role) ? pgLastError : null,
-        dockerPort: Number(process.env.PORT) || 3004,
+        dockerPort: Number(process.env.PORT) || 3006,
       },
     });
   } catch (err) {
@@ -4288,7 +4288,7 @@ app.post('/api/db/config', requireRoles('SUPERADMIN'), async (req, res) => {
     }
     const { host, port, user, password, database } = req.body || {};
     const targetHost = String(host || currentPgConfig.host || 'localhost').trim();
-    const targetPort = Number(port || currentPgConfig.port || 5435);
+    const targetPort = Number(port || currentPgConfig.port || 5436);
     if (isBlockedSsrfHost(targetHost, { allowLoopback: true }) || !isValidTcpPort(targetPort)) {
       res.status(400).json({ ok: false, error: 'Host atau port PostgreSQL tidak valid.' });
       return;
@@ -4324,7 +4324,7 @@ app.post('/api/db/config', requireRoles('SUPERADMIN'), async (req, res) => {
           database: currentPgConfig.database,
         },
         pgLastError,
-        dockerPort: Number(process.env.PORT) || 3004,
+        dockerPort: Number(process.env.PORT) || 3006,
       },
     });
   } catch (err) {
@@ -9086,7 +9086,7 @@ app.post(
 );
 
 // ============================================================================
-// 4. VITE MIDDLEWARE (DEV) OR STATIC ASSETS (PROD / DOCKER PORT 3004)
+// 4. VITE MIDDLEWARE (DEV) OR STATIC ASSETS (PROD / DOCKER PORT 3006)
 // ============================================================================
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';

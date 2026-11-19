@@ -1,9 +1,9 @@
 -- =============================================================================
--- JETCYBERNET SmartOLT Production Database Schema (PostgreSQL — Port 5435)
+-- JETCYBERNET SmartOLT Production Database Schema (PostgreSQL — Port 5436)
 -- User: likhin | Database: smartolt_db | Clean Schema (Zero Dummy Data)
 -- =============================================================================
 -- Catatan: Server Node.js (server.ts) otomatis membuat database "smartolt_db"
--- dan seluruh tabel di bawah ini saat pertama kali konek ke localhost:5435.
+-- dan seluruh tabel di bawah ini saat pertama kali konek ke localhost:5436.
 
 CREATE TABLE IF NOT EXISTS smartolt_relational_store (
   store_key VARCHAR(64) PRIMARY KEY,

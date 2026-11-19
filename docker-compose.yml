@@ -1,9 +1,9 @@
 # =============================================================================
-# Docker Compose — JETCYBERNET SmartOLT (Port 3004) + PostgreSQL Terpisah (Port 5435)
+# Docker Compose — JETCYBERNET SmartOLT (Port 3006) + PostgreSQL Terpisah (Port 5436)
 # - Container PostgreSQL dibuat TERPISAH (container_name & volume sendiri)
 #   agar tidak bentrok dengan PostgreSQL default (5432) yang sudah ada di Docker Anda.
-# - Bisa diakses langsung dari localhost:5435 (User: likhin | Pass dari env PG_PASSWORD)
-# - Web SmartOLT berjalan di http://localhost:3004
+# - Bisa diakses langsung dari localhost:5436 (User: likhin | Pass dari env PG_PASSWORD)
+# - Web SmartOLT berjalan di http://localhost:3006
 # =============================================================================
 
 services:
@@ -15,14 +15,14 @@ services:
       - POSTGRES_USER=${PG_USER:-likhin}
       - POSTGRES_PASSWORD=${PG_PASSWORD:-CHANGE_ME_STRONG_PASSWORD}
       - POSTGRES_DB=${PG_DATABASE:-smartolt_db}
-      - PGPORT=5435
+      - PGPORT=5436
     ports:
-      - "5435:5435"
+      - "5436:5436"
     volumes:
       - smartolt_pg_separate_data:/var/lib/postgresql/data
       - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U likhin -d smartolt_db -p 5435"]
+      test: ["CMD-SHELL", "pg_isready -U likhin -d smartolt_db -p 5436"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -37,14 +37,14 @@ services:
       smartolt-postgres:
         condition: service_healthy
     ports:
-      - "3004:3004"
+      - "3006:3006"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
       - NODE_ENV=production
-      - PORT=3004
+      - PORT=3006
       - PG_HOST=localhost
-      - PG_PORT=5435
+      - PG_PORT=5436
       - PG_USER=${PG_USER:-likhin}
       - PG_PASSWORD=${PG_PASSWORD:-CHANGE_ME_STRONG_PASSWORD}
       - PG_DATABASE=${PG_DATABASE:-smartolt_db}

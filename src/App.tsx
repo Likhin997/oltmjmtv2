@@ -191,19 +191,19 @@ export default function App() {
     pgLastError?: string | null;
     dockerPort: number;
   }>({
-    dbEngine: 'PostgreSQL (localhost:5435)',
+    dbEngine: 'PostgreSQL (localhost:5436)',
     pgConnected: false,
     pgConfig: {
       host: 'localhost',
-      port: 5435,
+      port: 5436,
       user: 'likhin',
       database: 'smartolt_db',
     },
-    dockerPort: 3004,
+    dockerPort: 3006,
   });
   const [showPgConfigModal, setShowPgConfigModal] = useState(false);
   const [pgHost, setPgHost] = useState('localhost');
-  const [pgPort, setPgPort] = useState(5435);
+  const [pgPort, setPgPort] = useState(5436);
   const [pgUser, setPgUser] = useState('likhin');
   const [pgPassword, setPgPassword] = useState('');
   const [pgDatabase, setPgDatabase] = useState('smartolt_db');
@@ -13018,7 +13018,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       )}
 
       {/* =====================================================================
-          MODAL: POSTGRESQL CONNECTION SETTINGS (localhost:5435 | user: likhin)
+          MODAL: POSTGRESQL CONNECTION SETTINGS (localhost:5436 | user: likhin)
          ===================================================================== */}
       {showPgConfigModal && isSuperadminUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs">
@@ -13042,7 +13042,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </div>
                 {dbMeta.pgLastError && !dbMeta.pgConnected && (
                   <div className="mt-1 text-amber-300">
-                    Info: Saat aplikasi dijalankan di Docker lokal Anda (<code>port 3004</code>), server otomatis terhubung ke PostgreSQL <code>{pgHost}:{pgPort}</code> dan membuat database <code>{pgDatabase}</code> beserta seluruh tabel.
+                    Info: Saat aplikasi dijalankan di Docker lokal Anda (<code>port 3006</code>), server otomatis terhubung ke PostgreSQL <code>{pgHost}:{pgPort}</code> dan membuat database <code>{pgDatabase}</code> beserta seluruh tabel.
                   </div>
                 )}
               </div>
@@ -13062,7 +13062,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </div>
                 <div>
                   <label className="block font-bold text-slate-300">
-                    Port (5435)
+                    Port (5436)
                   </label>
                   <input
                     type="number"

@@ -1,7 +1,7 @@
 /**
  * File: src/services/sourceCodeModules.ts
- * Menyimpan kode konfigurasi Docker (Port 3004) terpisah yang terkoneksi ke
- * PostgreSQL eksternal di localhost:5435 (user: likhin), skema SQL PostgreSQL bersih,
+ * Menyimpan kode konfigurasi Docker (Port 3006) terpisah yang terkoneksi ke
+ * PostgreSQL eksternal di localhost:5436 (user: likhin), skema SQL PostgreSQL bersih,
  * dan modul koneksi Telnet/SSH untuk deployment produksi.
  */
 
@@ -19,9 +19,9 @@ export const PRODUCTION_CODE_MODULES: CodeModuleFile[] = [
     fileName: 'docker-compose.yml',
     language: 'bash',
     description:
-      'Docker Compose: SmartOLT Web (Port 3004) + Container PostgreSQL Terpisah di localhost:5435 (gunakan env PG_PASSWORD)',
+      'Docker Compose: SmartOLT Web (Port 3006) + Container PostgreSQL Terpisah di localhost:5436 (gunakan env PG_PASSWORD)',
     code: `# File: docker-compose.yml
-# Membuat container PostgreSQL TERPISAH (jetcybernet-smartolt-postgres) di port 5435
+# Membuat container PostgreSQL TERPISAH (jetcybernet-smartolt-postgres) di port 5436
 # agar tidak bentrok dengan PostgreSQL (5432) yang sudah ada di Docker Anda.
 # Set PG_PASSWORD di file .env sebelum menjalankan docker compose up -d.
 
@@ -34,14 +34,14 @@ services:
       - POSTGRES_USER=likhin
       - POSTGRES_PASSWORD=\${PG_PASSWORD:-CHANGE_ME_STRONG_PASSWORD}
       - POSTGRES_DB=smartolt_db
-      - PGPORT=5435
+      - PGPORT=5436
     ports:
-      - "5435:5435"
+      - "5436:5436"
     volumes:
       - smartolt_pg_separate_data:/var/lib/postgresql/data
       - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U likhin -d smartolt_db -p 5435"]
+      test: ["CMD-SHELL", "pg_isready -U likhin -d smartolt_db -p 5436"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -56,14 +56,14 @@ services:
       smartolt-postgres:
         condition: service_healthy
     ports:
-      - "3004:3004"
+      - "3006:3006"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
       - NODE_ENV=production
-      - PORT=3004
+      - PORT=3006
       - PG_HOST=localhost
-      - PG_PORT=5435
+      - PG_PORT=5436
       - PG_USER=likhin
       - PG_PASSWORD=\${PG_PASSWORD:-CHANGE_ME_STRONG_PASSWORD}
       - PG_DATABASE=smartolt_db
@@ -80,7 +80,7 @@ volumes:
     fileName: 'Dockerfile',
     language: 'bash',
     description:
-      'Dockerfile Node 22 Alpine (Build Vite Frontend + Run Express, PostgreSQL Pool & Telnet Backend di Port 3004)',
+      'Dockerfile Node 22 Alpine (Build Vite Frontend + Run Express, PostgreSQL Pool & Telnet Backend di Port 3006)',
     code: `# File: Dockerfile
 FROM node:22-alpine
 
@@ -101,13 +101,13 @@ RUN npm run build
 RUN mkdir -p /app/data
 
 ENV NODE_ENV=production
-ENV PORT=3004
+ENV PORT=3006
 ENV PG_HOST=localhost
-ENV PG_PORT=5435
+ENV PG_PORT=5436
 ENV PG_USER=likhin
 ENV PG_DATABASE=smartolt_db
 
-EXPOSE 3004
+EXPOSE 3006
 
 CMD ["npx", "tsx", "server.ts"]
 `,
@@ -117,9 +117,9 @@ CMD ["npx", "tsx", "server.ts"]
     fileName: 'database/init.sql',
     language: 'sql',
     description:
-      'Skema Database PostgreSQL (Port 5435, User: likhin) — Bersih Tanpa Data Dummy (Otomatis dibuat oleh server.ts)',
+      'Skema Database PostgreSQL (Port 5436, User: likhin) — Bersih Tanpa Data Dummy (Otomatis dibuat oleh server.ts)',
     code: `-- File: database/init.sql
--- Database PostgreSQL (localhost:5435 | user: likhin | db: smartolt_db)
+-- Database PostgreSQL (localhost:5436 | user: likhin | db: smartolt_db)
 -- Catatan: server.ts otomatis membuat database "smartolt_db" dan seluruh tabel ini saat startup!
 
 CREATE TABLE IF NOT EXISTS smartolt_relational_store (
@@ -240,14 +240,14 @@ CREATE TABLE IF NOT EXISTS provisioning_logs (
     fileName: 'server.ts (PostgreSQL Pool)',
     language: 'typescript',
     description:
-      'Koneksi Pool PostgreSQL (pg) ke localhost:5435 dengan user likhin & Auto-Create Database/Tables',
+      'Koneksi Pool PostgreSQL (pg) ke localhost:5436 dengan user likhin & Auto-Create Database/Tables',
     code: `import pg from 'pg';
 const { Pool } = pg;
 
 // Konfigurasi default koneksi PostgreSQL di server.ts:
 export const pgConfig = {
   host: process.env.PG_HOST || 'localhost',
-  port: Number(process.env.PG_PORT || 5435), // Default 5432 diubah angka belakang jadi 5 -> 5435
+  port: Number(process.env.PG_PORT || 5436), // Default 5432 diubah menjadi 5436
   user: process.env.PG_USER || 'likhin',
   password: process.env.PG_PASSWORD || '',
   database: process.env.PG_DATABASE || 'smartolt_db',
