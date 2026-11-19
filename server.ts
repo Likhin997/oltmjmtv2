@@ -247,6 +247,16 @@ sqliteDb.exec(`
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS user_ui_preferences (
+    tenant_id TEXT NOT NULL DEFAULT 'root',
+    user_id INTEGER NOT NULL,
+    sidebar_collapsed INTEGER NOT NULL DEFAULT 0,
+    configured_onus_per_page INTEGER NOT NULL DEFAULT 50,
+    uncfg_first_seen_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (tenant_id, user_id)
+  );
 `);
 
 // Safe idempotent column migrations for multi-tenant isolation on existing SQLite DBs
@@ -644,6 +654,34 @@ async function initPostgresConnection(cfg: PgConnectionConfig): Promise<{
         }
       } catch {
         // ignore telemetry hydration warning
+      }
+
+      // Hydrate SaaS tenant registry from PostgreSQL if local SQLite cache is empty
+      try {
+        const localTenantCount = (
+          sqliteDb.prepare(`SELECT COUNT(*) AS cnt FROM saas_tenants`).get() as {
+            cnt: number;
+          }
+        ).cnt;
+        if (localTenantCount === 0) {
+          const pgTenantsRes = await pgPool.query(
+            `SELECT json_payload FROM smartolt_relational_store WHERE store_key = 'SAAS_TENANTS_REGISTRY' LIMIT 1`
+          );
+          if (pgTenantsRes.rows.length > 0 && pgTenantsRes.rows[0]?.json_payload) {
+            const parsedTenants = JSON.parse(
+              String(pgTenantsRes.rows[0].json_payload)
+            ) as Partial<TenantRecord>[];
+            if (Array.isArray(parsedTenants)) {
+              for (const row of parsedTenants) {
+                if (row && row.id) {
+                  upsertTenantSync(normalizeTenantRow(row));
+                }
+              }
+            }
+          }
+        }
+      } catch {
+        // ignore tenant registry hydration warning
       }
 
       const displayHost = isLocalTarget ? 'localhost' : candidateHost;
@@ -1076,15 +1114,20 @@ async function deleteTenantCompletely(tenantId: string): Promise<void> {
     .prepare(`DELETE FROM olt_interface_telemetry_samples WHERE tenant_id = ?`)
     .run(tenantId);
   sqliteDb
-    .prepare(`DELETE FROM smartolt_relational_store WHERE store_key IN (?, ?)`)
-    .run(storeKey, brandingKey);
+    .prepare(`DELETE FROM user_ui_preferences WHERE tenant_id = ?`)
+    .run(tenantId);
+  sqliteDb
+    .prepare(
+      `DELETE FROM smartolt_relational_store WHERE store_key IN (?, ?) OR store_key LIKE ?`
+    )
+    .run(storeKey, brandingKey, `PREF:${tenantId}:%`);
   sqliteDb.prepare(`DELETE FROM saas_tenants WHERE id = ?`).run(tenantId);
 
   if (pgPool && pgConnected) {
     try {
       await pgPool.query(
-        `DELETE FROM smartolt_relational_store WHERE store_key IN ($1, $2)`,
-        [storeKey, brandingKey]
+        `DELETE FROM smartolt_relational_store WHERE store_key IN ($1, $2) OR store_key LIKE $3`,
+        [storeKey, brandingKey, `PREF:${tenantId}:%`]
       );
       await syncTenantsRegistryToPostgres();
     } catch (err) {
@@ -3937,6 +3980,228 @@ app.post(
     }
   }
 );
+
+// GET /api/preferences — Load user & tenant UI preferences directly from SQLite/PostgreSQL (zero localStorage)
+app.get('/api/preferences', async (req, res) => {
+  try {
+    const authedReq = req as AuthedRequest;
+    if (!authedReq.authUser) {
+      res.status(401).json({ ok: false, error: 'Unauthorized' });
+      return;
+    }
+    const tenantId = authedReq.authTenantId || ROOT_TENANT_ID;
+    const userId = authedReq.authUser.id;
+    const prefStoreKey = `PREF:${tenantId}:${userId}`;
+
+    let row = sqliteDb
+      .prepare(
+        `SELECT sidebar_collapsed, configured_onus_per_page, uncfg_first_seen_json, updated_at
+         FROM user_ui_preferences WHERE tenant_id = ? AND user_id = ?`
+      )
+      .get(tenantId, userId) as
+      | {
+          sidebar_collapsed: number;
+          configured_onus_per_page: number;
+          uncfg_first_seen_json: string;
+          updated_at: string;
+        }
+      | undefined;
+
+    if (!row && pgPool && pgConnected) {
+      try {
+        const pgRes = await pgPool.query(
+          `SELECT json_payload FROM smartolt_relational_store WHERE store_key = $1 LIMIT 1`,
+          [prefStoreKey]
+        );
+        if (pgRes.rows.length > 0 && pgRes.rows[0]?.json_payload) {
+          const parsed = JSON.parse(String(pgRes.rows[0].json_payload));
+          const sidebarCollapsed = parsed.sidebarCollapsed ? 1 : 0;
+          const perPage = [50, 100, 1000].includes(Number(parsed.configuredOnusPerPage))
+            ? Number(parsed.configuredOnusPerPage)
+            : 50;
+          const uncfgJson = JSON.stringify(
+            parsed.uncfgFirstSeen && typeof parsed.uncfgFirstSeen === 'object'
+              ? parsed.uncfgFirstSeen
+              : {}
+          );
+          const nowStr = new Date().toISOString();
+          sqliteDb
+            .prepare(
+              `INSERT INTO user_ui_preferences (
+                tenant_id, user_id, sidebar_collapsed, configured_onus_per_page, uncfg_first_seen_json, updated_at
+              ) VALUES (?, ?, ?, ?, ?, ?)
+              ON CONFLICT(tenant_id, user_id) DO UPDATE SET
+                sidebar_collapsed = excluded.sidebar_collapsed,
+                configured_onus_per_page = excluded.configured_onus_per_page,
+                uncfg_first_seen_json = excluded.uncfg_first_seen_json,
+                updated_at = excluded.updated_at`
+            )
+            .run(tenantId, userId, sidebarCollapsed, perPage, uncfgJson, nowStr);
+          row = {
+            sidebar_collapsed: sidebarCollapsed,
+            configured_onus_per_page: perPage,
+            uncfg_first_seen_json: uncfgJson,
+            updated_at: nowStr,
+          };
+        }
+      } catch {
+        // fallback to defaults
+      }
+    }
+
+    let uncfgFirstSeen: Record<string, number> = {};
+    if (row?.uncfg_first_seen_json) {
+      try {
+        const parsed = JSON.parse(row.uncfg_first_seen_json);
+        if (parsed && typeof parsed === 'object') {
+          uncfgFirstSeen = parsed as Record<string, number>;
+        }
+      } catch {
+        uncfgFirstSeen = {};
+      }
+    }
+
+    const perPageVal = row ? Number(row.configured_onus_per_page) : 50;
+    res.json({
+      ok: true,
+      preferences: {
+        sidebarCollapsed: Boolean(row?.sidebar_collapsed),
+        configuredOnusPerPage: ([50, 100, 1000].includes(perPageVal)
+          ? perPageVal
+          : 50) as 50 | 100 | 1000,
+        uncfgFirstSeen,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// PUT /api/preferences — Persist user & tenant UI preferences directly to SQLite + PostgreSQL
+app.put('/api/preferences', async (req, res) => {
+  try {
+    const authedReq = req as AuthedRequest;
+    if (!authedReq.authUser) {
+      res.status(401).json({ ok: false, error: 'Unauthorized' });
+      return;
+    }
+    const tenantId = authedReq.authTenantId || ROOT_TENANT_ID;
+    const userId = authedReq.authUser.id;
+    const prefStoreKey = `PREF:${tenantId}:${userId}`;
+    const body = (req.body || {}) as {
+      sidebarCollapsed?: boolean;
+      configuredOnusPerPage?: number;
+      uncfgFirstSeen?: Record<string, number>;
+    };
+
+    const existing = sqliteDb
+      .prepare(
+        `SELECT sidebar_collapsed, configured_onus_per_page, uncfg_first_seen_json
+         FROM user_ui_preferences WHERE tenant_id = ? AND user_id = ?`
+      )
+      .get(tenantId, userId) as
+      | {
+          sidebar_collapsed: number;
+          configured_onus_per_page: number;
+          uncfg_first_seen_json: string;
+        }
+      | undefined;
+
+    const sidebarCollapsed =
+      typeof body.sidebarCollapsed === 'boolean'
+        ? body.sidebarCollapsed
+          ? 1
+          : 0
+        : existing
+        ? existing.sidebar_collapsed
+        : 0;
+
+    const rawPerPage =
+      body.configuredOnusPerPage !== undefined
+        ? Number(body.configuredOnusPerPage)
+        : existing
+        ? Number(existing.configured_onus_per_page)
+        : 50;
+    const configuredOnusPerPage = [50, 100, 1000].includes(rawPerPage)
+      ? rawPerPage
+      : 50;
+
+    let mergedUncfg: Record<string, number> = {};
+    if (existing?.uncfg_first_seen_json) {
+      try {
+        const parsed = JSON.parse(existing.uncfg_first_seen_json);
+        if (parsed && typeof parsed === 'object') {
+          mergedUncfg = { ...parsed };
+        }
+      } catch {
+        // ignore
+      }
+    }
+    if (body.uncfgFirstSeen && typeof body.uncfgFirstSeen === 'object') {
+      for (const [k, v] of Object.entries(body.uncfgFirstSeen)) {
+        const ts = Number(v);
+        if (k && Number.isFinite(ts) && ts > 0) {
+          if (!mergedUncfg[k] || ts < mergedUncfg[k]) {
+            mergedUncfg[k] = ts;
+          }
+        }
+      }
+      // Keep max 2000 most recent entries to avoid unbounded growth
+      const entries = Object.entries(mergedUncfg);
+      if (entries.length > 2000) {
+        entries.sort((a, b) => b[1] - a[1]);
+        mergedUncfg = Object.fromEntries(entries.slice(0, 2000));
+      }
+    }
+
+    const nowStr = new Date().toISOString();
+    const uncfgJson = JSON.stringify(mergedUncfg);
+
+    sqliteDb
+      .prepare(
+        `INSERT INTO user_ui_preferences (
+          tenant_id, user_id, sidebar_collapsed, configured_onus_per_page, uncfg_first_seen_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(tenant_id, user_id) DO UPDATE SET
+          sidebar_collapsed = excluded.sidebar_collapsed,
+          configured_onus_per_page = excluded.configured_onus_per_page,
+          uncfg_first_seen_json = excluded.uncfg_first_seen_json,
+          updated_at = excluded.updated_at`
+      )
+      .run(
+        tenantId,
+        userId,
+        sidebarCollapsed,
+        configuredOnusPerPage,
+        uncfgJson,
+        nowStr
+      );
+
+    const payload = {
+      sidebarCollapsed: Boolean(sidebarCollapsed),
+      configuredOnusPerPage: configuredOnusPerPage as 50 | 100 | 1000,
+      uncfgFirstSeen: mergedUncfg,
+    };
+
+    if (pgPool && pgConnected) {
+      try {
+        await pgPool.query(
+          `INSERT INTO smartolt_relational_store (store_key, json_payload, updated_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT (store_key) DO UPDATE
+           SET json_payload = EXCLUDED.json_payload, updated_at = NOW()`,
+          [prefStoreKey, JSON.stringify(payload)]
+        );
+      } catch (pgErr) {
+        console.warn('[Preferences] PG sync warning:', formatPgError(pgErr));
+      }
+    }
+
+    res.json({ ok: true, preferences: payload });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
 
 // GET /api/state — Load live isolated database state + PostgreSQL connection status
 app.get('/api/state', async (req, res) => {

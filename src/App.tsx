@@ -566,23 +566,33 @@ export default function App() {
   const [openDropdown, setOpenDropdown] = useState<
     'MAP' | 'TASKS' | 'REPORTS' | 'SETTINGS' | null
   >(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem('smartolt_sidebar_collapsed') === '1';
-    } catch {
-      return false;
-    }
-  });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState<boolean>(false);
+  const uncfgPrefsSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const persistUserPreferencesToDb = useCallback(
+    async (patch: {
+      sidebarCollapsed?: boolean;
+      configuredOnusPerPage?: 50 | 100 | 1000;
+      uncfgFirstSeen?: Record<string, number>;
+    }) => {
+      try {
+        await fetch('/api/preferences', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patch),
+        });
+      } catch {
+        // ignore transient network error
+      }
+    },
+    []
+  );
 
   const toggleSidebarCollapse = () => {
     setSidebarCollapsed((prev) => {
       const next = !prev;
-      try {
-        window.localStorage.setItem('smartolt_sidebar_collapsed', next ? '1' : '0');
-      } catch {
-        // ignore
-      }
+      void persistUserPreferencesToDb({ sidebarCollapsed: next });
       return next;
     });
   };
@@ -870,14 +880,50 @@ export default function App() {
   const [isPollingUncfg, setIsPollingUncfg] = useState(false);
   const [lastUncfgCliOutput, setLastUncfgCliOutput] = useState<string | null>(null);
   const [uncfgNowMs, setUncfgNowMs] = useState<number>(() => Date.now());
-  const uncfgFirstSeenRef = useRef<Record<string, number>>((() => {
+  const uncfgFirstSeenRef = useRef<Record<string, number>>({});
+
+  useEffect(() => {
+    // Purge legacy localStorage keys so 100% of app data & preferences live in database
     try {
-      const raw = localStorage.getItem('smartolt_uncfg_first_seen_v1');
-      return raw ? (JSON.parse(raw) as Record<string, number>) : {};
+      window.localStorage.removeItem('smartolt_sidebar_collapsed');
+      window.localStorage.removeItem('smartolt_uncfg_first_seen_v1');
+      window.localStorage.removeItem('smartolt_configured_onus_per_page');
     } catch {
-      return {};
+      // ignore
     }
-  })());
+    if (loggedInUserId === null) {
+      uncfgFirstSeenRef.current = {};
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/preferences', { cache: 'no-store' });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled && data?.ok && data.preferences) {
+          setSidebarCollapsed(Boolean(data.preferences.sidebarCollapsed));
+          const perPage = Number(data.preferences.configuredOnusPerPage);
+          if (perPage === 50 || perPage === 100 || perPage === 1000) {
+            setConfiguredOnusPerPage(perPage);
+          }
+          if (
+            data.preferences.uncfgFirstSeen &&
+            typeof data.preferences.uncfgFirstSeen === 'object'
+          ) {
+            uncfgFirstSeenRef.current = {
+              ...(data.preferences.uncfgFirstSeen as Record<string, number>),
+            };
+          }
+        }
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loggedInUserId, activeTenantInfo?.id]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -920,13 +966,15 @@ export default function App() {
       startMs < uncfgFirstSeenRef.current[key]
     ) {
       uncfgFirstSeenRef.current[key] = startMs;
-      try {
-        localStorage.setItem(
-          'smartolt_uncfg_first_seen_v1',
-          JSON.stringify(uncfgFirstSeenRef.current)
-        );
-      } catch {
-        // ignore storage quota error
+      if (loggedInUserId !== null) {
+        if (uncfgPrefsSaveTimerRef.current) {
+          clearTimeout(uncfgPrefsSaveTimerRef.current);
+        }
+        uncfgPrefsSaveTimerRef.current = setTimeout(() => {
+          void persistUserPreferencesToDb({
+            uncfgFirstSeen: { ...uncfgFirstSeenRef.current },
+          });
+        }, 1200);
       }
     }
 
@@ -979,29 +1027,13 @@ export default function App() {
   const [filterSignalLevel, setFilterSignalLevel] = useState<
     'ALL' | 'LOW' | 'GOOD' | 'WARNING' | 'CRITICAL'
   >('ALL');
-  const [configuredOnusPerPage, setConfiguredOnusPerPage] = useState<50 | 100 | 1000>(() => {
-    try {
-      const saved = Number(
-        localStorage.getItem('smartolt_configured_onus_per_page')
-      );
-      if (saved === 50 || saved === 100 || saved === 1000) {
-        return saved;
-      }
-    } catch {
-      // ignore storage error
-    }
-    return 50;
-  });
+  const [configuredOnusPerPage, setConfiguredOnusPerPage] = useState<50 | 100 | 1000>(50);
   const [configuredOnusPage, setConfiguredOnusPage] = useState<number>(1);
 
   const handleSelectConfiguredPerPage = (size: 50 | 100 | 1000) => {
     setConfiguredOnusPerPage(size);
     setConfiguredOnusPage(1);
-    try {
-      localStorage.setItem('smartolt_configured_onus_per_page', String(size));
-    } catch {
-      // ignore storage error
-    }
+    void persistUserPreferencesToDb({ configuredOnusPerPage: size });
   };
 
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -4782,15 +4814,19 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           badgeColor: '',
           onClick: () => setActiveView('DIAG_PARSER'),
         },
-        {
-          id: 'SOURCE_CODE',
-          label: 'SQL & Backend Code',
-          icon: Code2,
-          active: activeView === 'SOURCE_CODE',
-          badge: null,
-          badgeColor: '',
-          onClick: () => setActiveView('SOURCE_CODE'),
-        },
+        ...(isSuperadminUser
+          ? [
+              {
+                id: 'SOURCE_CODE',
+                label: 'SQL & Backend Code',
+                icon: Code2,
+                active: activeView === 'SOURCE_CODE',
+                badge: null,
+                badgeColor: '',
+                onClick: () => setActiveView('SOURCE_CODE'),
+              },
+            ]
+          : []),
         ...(!isViewerUser
           ? [
               {
@@ -5079,7 +5115,14 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     { label: 'VPN & TR-069 ACS', view: 'VPN_TR069' as NavigationView },
                     { label: 'Tasks & Log CLI', view: 'TASKS' as NavigationView },
                     { label: 'CLI Diagnostics', view: 'DIAG_PARSER' as NavigationView },
-                    { label: 'SQL & Backend Code', view: 'SOURCE_CODE' as NavigationView },
+                    ...(isSuperadminUser
+                      ? [
+                          {
+                            label: 'SQL & Backend Code',
+                            view: 'SOURCE_CODE' as NavigationView,
+                          },
+                        ]
+                      : []),
                   ].map((item) => (
                     <button
                       key={item.label}
@@ -12353,7 +12396,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         {/* ===================================================================
             VIEW 12: SQL SCHEMA & BACKEND SOURCE CODE VIEWER
            =================================================================== */}
-        {activeView === 'SOURCE_CODE' && (
+        {activeView === 'SOURCE_CODE' && isSuperadminUser && (
           <div className="space-y-4 text-xs">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
