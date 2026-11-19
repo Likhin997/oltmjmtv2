@@ -80,6 +80,7 @@ services:
     networks:
       - smartolt_db_internal
       - smartolt_app_net
+      - proxy-net
     environment:
       - NODE_ENV=production
       - PORT=3006
@@ -102,6 +103,9 @@ networks:
   # Jaringan outbound agar SmartOLT Web tetap bisa mengakses OLT (Telnet/SSH/SNMP)
   smartolt_app_net:
     driver: bridge
+  # Jaringan Nginx Proxy Manager (NPM) yang sudah ada di host
+  proxy-net:
+    external: true
 
 volumes:
   smartolt_saas_pg_data:
