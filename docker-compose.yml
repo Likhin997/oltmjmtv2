@@ -9,7 +9,7 @@
 services:
   smartolt-postgres:
     image: postgres:16-alpine
-    container_name: jetcybernet-smartolt-postgres
+    container_name: jetcybernet-smartolt-saas-postgres
     restart: unless-stopped
     environment:
       - POSTGRES_USER=${PG_USER:-likhin}
@@ -19,7 +19,7 @@ services:
     ports:
       - "5436:5436"
     volumes:
-      - smartolt_pg_separate_data:/var/lib/postgresql/data
+      - smartolt_saas_pg_data:/var/lib/postgresql/data
       - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U likhin -d smartolt_db -p 5436"]
@@ -31,7 +31,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: jetcybernet-smartolt-app
+    container_name: jetcybernet-smartolt-saas-app
     restart: unless-stopped
     depends_on:
       smartolt-postgres:
@@ -53,4 +53,4 @@ services:
       - ./data:/app/data
 
 volumes:
-  smartolt_pg_separate_data:
+  smartolt_saas_pg_data:

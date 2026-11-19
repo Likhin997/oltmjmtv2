@@ -21,14 +21,14 @@ export const PRODUCTION_CODE_MODULES: CodeModuleFile[] = [
     description:
       'Docker Compose: SmartOLT Web (Port 3006) + Container PostgreSQL Terpisah di localhost:5436 (gunakan env PG_PASSWORD)',
     code: `# File: docker-compose.yml
-# Membuat container PostgreSQL TERPISAH (jetcybernet-smartolt-postgres) di port 5436
-# agar tidak bentrok dengan PostgreSQL (5432) yang sudah ada di Docker Anda.
+# Membuat container PostgreSQL TERPISAH (jetcybernet-smartolt-saas-postgres) di port 5436
+# agar tidak bentrok dengan PostgreSQL (5432/5435) yang sudah ada di Docker Anda.
 # Set PG_PASSWORD di file .env sebelum menjalankan docker compose up -d.
 
 services:
   smartolt-postgres:
     image: postgres:16-alpine
-    container_name: jetcybernet-smartolt-postgres
+    container_name: jetcybernet-smartolt-saas-postgres
     restart: unless-stopped
     environment:
       - POSTGRES_USER=likhin
@@ -38,7 +38,7 @@ services:
     ports:
       - "5436:5436"
     volumes:
-      - smartolt_pg_separate_data:/var/lib/postgresql/data
+      - smartolt_saas_pg_data:/var/lib/postgresql/data
       - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U likhin -d smartolt_db -p 5436"]
@@ -50,7 +50,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: jetcybernet-smartolt-app
+    container_name: jetcybernet-smartolt-saas-app
     restart: unless-stopped
     depends_on:
       smartolt-postgres:
@@ -72,7 +72,7 @@ services:
       - ./data:/app/data
 
 volumes:
-  smartolt_pg_separate_data:
+  smartolt_saas_pg_data:
 `,
   },
   {
