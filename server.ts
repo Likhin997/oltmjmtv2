@@ -50,9 +50,50 @@ dotenv.config();
 const { Pool } = pg;
 const app = express();
 
-// Nonaktifkan header X-Powered-By agar fingerprint framework tidak terekspos
+// Nonaktifkan header X-Powered-By & ETag agar fingerprint Node.js/Express tidak terekspos ke Shodan
 app.disable('x-powered-by');
+app.set('etag', false);
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '60mb' }));
+
+// Blokir langsung probe scanner umum (Shodan/bot/vulnerability scanner) tanpa respons fingerprint
+const BLOCKED_PROBE_PATTERNS = [
+  /^\/\.(env|git|hg|svn|aws|htaccess|htpasswd|DS_Store)/i,
+  /^\/(wp-admin|wp-login|wp-content|wp-includes|xmlrpc\.php|phpmyadmin|pma|adminer|server-status|cgi-bin|boaform|HNAP1)/i,
+  /\.(php|asp|aspx|jsp|cgi|sql|bak|old|orig|swp)$/i,
+];
+app.use((req, res, next) => {
+  const reqPath = req.path || '';
+  if (!reqPath.startsWith('/api/') && BLOCKED_PROBE_PATTERNS.some((rx) => rx.test(reqPath))) {
+    res.status(404).end();
+    return;
+  }
+  next();
+});
+
+// Rate-limiter global per IP untuk endpoint /api (anti-DDoS / scraping / brute-force)
+const globalApiRateWindow = new Map<string, { count: number; resetAt: number }>();
+app.use('/api', (req, res, next) => {
+  const now = Date.now();
+  if (globalApiRateWindow.size > 5000) {
+    for (const [k, v] of globalApiRateWindow.entries()) {
+      if (v.resetAt <= now) globalApiRateWindow.delete(k);
+    }
+  }
+  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+  const existing = globalApiRateWindow.get(clientIp);
+  if (!existing || existing.resetAt <= now) {
+    globalApiRateWindow.set(clientIp, { count: 1, resetAt: now + 60_000 });
+    next();
+    return;
+  }
+  if (existing.count >= 300) {
+    res.status(429).json({ ok: false, error: 'Too many requests. Please slow down.' });
+    return;
+  }
+  existing.count++;
+  next();
+});
 
 // Transparent Gzip compression for large JSON API responses (>8 KB) — shrinks 10,000 ONUs from ~10MB to ~650KB
 app.use('/api', (req, res, next) => {
@@ -93,10 +134,19 @@ app.use('/api', (req, res, next) => {
 
 // Pasang HTTP Security Headers di semua response tanpa memblokir iframe preview
 app.use((req, res, next) => {
+  res.removeHeader('X-Powered-By');
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-XSS-Protection', '0');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+  if (process.env.NODE_ENV === 'production' && process.cwd() !== '/app/applet') {
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    if (req.secure || String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https') {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+  }
   if (req.path.startsWith('/api')) {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     res.setHeader('Pragma', 'no-cache');
@@ -158,11 +208,22 @@ export interface PgConnectionConfig {
   database: string;
 }
 
+function isValidPgIdentifier(name: string): boolean {
+  return /^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(name);
+}
+
+const pgSslConfig =
+  String(process.env.PG_SSL || '').toLowerCase() === 'true'
+    ? { rejectUnauthorized: String(process.env.PG_SSL_REJECT_UNAUTHORIZED || 'true').toLowerCase() !== 'false' }
+    : undefined;
+
 let currentPgConfig: PgConnectionConfig = {
   host: process.env.PG_HOST || 'localhost',
   port: Number(process.env.PG_PORT || 5436),
   user: process.env.PG_USER || 'likhin',
-  password: process.env.PG_PASSWORD || '11013009',
+  password:
+    process.env.PG_PASSWORD ??
+    (process.env.NODE_ENV === 'production' ? '' : '11013009'),
   database: process.env.PG_DATABASE || 'smartolt_db',
 };
 
@@ -500,6 +561,9 @@ async function tryConnectSingleHost(
   password: string,
   targetDb: string
 ): Promise<{ pool: pg.Pool; resolvedDb: string }> {
+  if (!isValidPgIdentifier(targetDb)) {
+    throw new Error('Nama database PostgreSQL tidak valid (hanya huruf, angka, dan underscore).');
+  }
   const timeoutMs = isAiStudioWorkspace ? 800 : 2500;
   // 1. Try connecting directly to targetDb first
   const directPool = new Pool({
@@ -510,6 +574,9 @@ async function tryConnectSingleHost(
     database: targetDb,
     max: 15,
     connectionTimeoutMillis: timeoutMs,
+    idleTimeoutMillis: 30000,
+    statement_timeout: 30000,
+    ssl: pgSslConfig,
   });
 
   try {
@@ -536,6 +603,8 @@ async function tryConnectSingleHost(
       password,
       database: adminDb,
       connectionTimeoutMillis: 2500,
+      statement_timeout: 15000,
+      ssl: pgSslConfig,
     });
     try {
       const dbCheck = await adminPool.query(
@@ -558,6 +627,9 @@ async function tryConnectSingleHost(
         database: targetDb,
         max: 15,
         connectionTimeoutMillis: 3000,
+        idleTimeoutMillis: 30000,
+        statement_timeout: 30000,
+        ssl: pgSslConfig,
       });
       await createdPool.query('SELECT 1');
       return { pool: createdPool, resolvedDb: targetDb };
@@ -4441,6 +4513,12 @@ app.post('/api/db/config', requireRoles('SUPERADMIN'), async (req, res) => {
       return;
     }
 
+    const targetDbName = String(database || currentPgConfig.database || 'smartolt_db').trim();
+    if (!isValidPgIdentifier(targetDbName)) {
+      res.status(400).json({ ok: false, error: 'Nama database PostgreSQL tidak valid.' });
+      return;
+    }
+
     const nextCfg: PgConnectionConfig = {
       host: targetHost,
       port: targetPort,
@@ -4449,7 +4527,7 @@ app.post('/api/db/config', requireRoles('SUPERADMIN'), async (req, res) => {
         password && password !== MASKED_SECRET
           ? String(password)
           : currentPgConfig.password,
-      database: String(database || currentPgConfig.database || 'smartolt_db').trim(),
+      database: targetDbName,
     };
 
     const result = await initPostgresConnection(nextCfg);
@@ -9267,9 +9345,13 @@ async function startServer() {
     });
   }
 
-  app.listen(port, '0.0.0.0', () => {
+  const bindHost =
+    process.env.BIND_HOST ||
+    (isAiStudioWorkspace ? '0.0.0.0' : '0.0.0.0');
+
+  app.listen(port, bindHost, () => {
     console.log(
-      `[JETCYBERNET SmartOLT Server] Running on http://0.0.0.0:${port} | Target DB: ${currentPgConfig.user}@${currentPgConfig.host}:${currentPgConfig.port}/${currentPgConfig.database}`
+      `[JETCYBERNET SmartOLT Server] Running on http://${bindHost}:${port} | Target DB: ${currentPgConfig.user}@${currentPgConfig.host}:${currentPgConfig.port}/${currentPgConfig.database}`
     );
     void initPostgresConnection(currentPgConfig);
   });

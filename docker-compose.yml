@@ -1,9 +1,13 @@
 # =============================================================================
-# Docker Compose — JETCYBERNET SmartOLT (Port 3006) + PostgreSQL Terpisah (Port 5436)
-# - Container PostgreSQL dibuat TERPISAH (container_name & volume sendiri)
-#   agar tidak bentrok dengan PostgreSQL default (5432) yang sudah ada di Docker Anda.
-# - Bisa diakses langsung dari localhost:5436 (User: likhin | Pass dari env PG_PASSWORD)
-# - Web SmartOLT berjalan di http://localhost:3006
+# Docker Compose — JETCYBERNET SmartOLT Hardened Production Stack
+# KEAMANAN ANTI-SHODAN & PROTEKSI DATABASE:
+# 1. PostgreSQL TIDAK mengekspos port apa pun ke host/internet (ZERO ports:).
+#    Database hanya bisa diakses secara privat oleh container web melalui
+#    jaringan Docker internal (`smartolt_db_internal` dengan `internal: true`).
+# 2. Web SmartOLT hanya bind ke loopback host (`127.0.0.1:3006:3006`), sehingga
+#    port 3006 TIDAK pernah muncul di Shodan / scanner IP publik.
+#    Akses publik wajib melewati Reverse Proxy (Nginx/Caddy TLS) atau Cloudflare Tunnel.
+# 3. Wajib buat file `.env` berisi PG_PASSWORD & ADMIN_DEFAULT_PASSWORD yang kuat.
 # =============================================================================
 
 services:
@@ -13,16 +17,46 @@ services:
     restart: unless-stopped
     environment:
       - POSTGRES_USER=${PG_USER:-likhin}
-      - POSTGRES_PASSWORD=${PG_PASSWORD:-CHANGE_ME_STRONG_PASSWORD}
+      - POSTGRES_PASSWORD=${PG_PASSWORD:?Wajib set PG_PASSWORD yang kuat di file .env}
       - POSTGRES_DB=${PG_DATABASE:-smartolt_db}
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=scram-sha-256
       - PGPORT=5436
-    ports:
-      - "5436:5436"
+    # Sengaja TIDAK ada blok `ports:` agar port PostgreSQL 100% tertutup dari internet & Shodan.
+    expose:
+      - "5436"
+    command:
+      - postgres
+      - -p
+      - "5436"
+      - -c
+      - password_encryption=scram-sha-256
+      - -c
+      - max_connections=100
+      - -c
+      - statement_timeout=30000
+      - -c
+      - idle_in_transaction_session_timeout=30000
+      - -c
+      - log_connections=on
+      - -c
+      - log_disconnections=on
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    networks:
+      - smartolt_db_internal
     volumes:
       - smartolt_saas_pg_data:/var/lib/postgresql/data
       - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U likhin -d smartolt_db -p 5436"]
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-likhin} -d ${PG_DATABASE:-smartolt_db} -p 5436"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -36,21 +70,38 @@ services:
     depends_on:
       smartolt-postgres:
         condition: service_healthy
+    # Bind HANYA ke 127.0.0.1 agar tidak bypass UFW & tidak terdeteksi Shodan!
     ports:
-      - "3006:3006"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "127.0.0.1:3006:3006"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - smartolt_db_internal
+      - smartolt_app_net
     environment:
       - NODE_ENV=production
       - PORT=3006
-      - PG_HOST=localhost
+      - BIND_HOST=0.0.0.0
+      - PG_HOST=smartolt-postgres
       - PG_PORT=5436
       - PG_USER=${PG_USER:-likhin}
-      - PG_PASSWORD=${PG_PASSWORD:-CHANGE_ME_STRONG_PASSWORD}
+      - PG_PASSWORD=${PG_PASSWORD:?Wajib set PG_PASSWORD yang kuat di file .env}
       - PG_DATABASE=${PG_DATABASE:-smartolt_db}
+      - ADMIN_DEFAULT_PASSWORD=${ADMIN_DEFAULT_PASSWORD:-}
       - SQLITE_PATH=/app/data/smartolt_live.sqlite
     volumes:
       - ./data:/app/data
+
+networks:
+  # Jaringan internal penuh tanpa rute internet untuk melindungi PostgreSQL
+  smartolt_db_internal:
+    driver: bridge
+    internal: true
+  # Jaringan outbound agar SmartOLT Web tetap bisa mengakses OLT (Telnet/SSH/SNMP)
+  smartolt_app_net:
+    driver: bridge
 
 volumes:
   smartolt_saas_pg_data:
