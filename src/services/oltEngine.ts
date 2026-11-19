@@ -1889,52 +1889,6 @@ export function generateDeleteOnuCliScript(ponInterface: string, onuIndex: numbe
 }
 
 /**
- * Helper Klasifikasi Warna Redaman Optik sesuai Standar FTTH SmartOLT
- */
-export function classifyOpticalSignal(
-  rxDbm: number | null,
-  phaseState: string
-): {
-  level: 'GOOD' | 'WARNING' | 'CRITICAL' | 'OFFLINE';
-  label: string;
-  badgeClass: string;
-} {
-  if (phaseState === 'LOS' || rxDbm === null || rxDbm <= -38) {
-    return {
-      level: 'CRITICAL',
-      label: phaseState === 'LOS' ? 'LOS (No Light)' : 'No Signal',
-      badgeClass: 'bg-red-600 text-white',
-    };
-  }
-  if (phaseState === 'DyingGasp' || phaseState === 'OffLine') {
-    return {
-      level: 'OFFLINE',
-      label: `${rxDbm.toFixed(2)} dBm (PwrOff)`,
-      badgeClass: 'bg-slate-600 text-white',
-    };
-  }
-  if (rxDbm >= -24.99 && rxDbm <= -8.0) {
-    return {
-      level: 'GOOD',
-      label: `${rxDbm.toFixed(2)} dBm`,
-      badgeClass: 'bg-emerald-600 text-white',
-    };
-  }
-  if (rxDbm >= -27.0 && rxDbm < -24.99) {
-    return {
-      level: 'WARNING',
-      label: `${rxDbm.toFixed(2)} dBm`,
-      badgeClass: 'bg-amber-500 text-slate-950 font-semibold',
-    };
-  }
-  return {
-    level: 'CRITICAL',
-    label: `${rxDbm.toFixed(2)} dBm`,
-    badgeClass: 'bg-red-600 text-white',
-  };
-}
-
-/**
  * 8. GENERATOR CLI ZTE UNTUK KONFIGURASI PORT UPLINK & TAG VLAN KE UPLINK
  * Sesuai persis dengan `interface xgei_1/19/1` & `interface gei_1/19/3` di running-config:
  *   interface gei_1/19/3

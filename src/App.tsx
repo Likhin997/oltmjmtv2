@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo, useDeferredValue } from 'react';
 import {
   INITIAL_DB_STATE,
   DEFAULT_APP_USERS,
@@ -56,7 +56,6 @@ import {
   RefreshCw,
   Play,
   History,
-  Square,
   Search,
   Plus,
   Download,
@@ -78,7 +77,6 @@ import {
   GitBranch,
   BarChart3,
   Activity,
-  ShieldCheck,
   Users,
   PanelLeftClose,
   PanelLeftOpen,
@@ -172,7 +170,6 @@ export default function App() {
     useState<ActiveImpersonatorInfo | null>(null);
   const [isolationNotice, setIsolationNotice] =
     useState<IsolationNoticePayload | null>(null);
-  const [sessionTokenId, setSessionTokenId] = useState<string | null>(null);
   const [loggedInUserId, setLoggedInUserId] = useState<number | null>(null);
   const [idleRemainingMs, setIdleRemainingMs] = useState<number>(
     IDLE_SESSION_TIMEOUT_MS
@@ -354,11 +351,26 @@ export default function App() {
     };
   };
 
-  const loadAuthorizedDatabaseState = async () => {
+  const serverStateVersionRef = useRef<number>(0);
+
+  const loadAuthorizedDatabaseState = async (allowDeltaSkip = false) => {
     try {
-      const r = await fetch('/api/state');
+      const qs =
+        allowDeltaSkip && serverStateVersionRef.current > 0
+          ? `?sinceVersion=${serverStateVersionRef.current}`
+          : '';
+      const r = await fetch(`/api/state${qs}`);
       if (!r.ok) return;
       const data = await r.json();
+      if (data && data.unchanged) {
+        if (typeof data.stateVersion === 'number') {
+          serverStateVersionRef.current = data.stateVersion;
+        }
+        return;
+      }
+      if (typeof data?.stateVersion === 'number') {
+        serverStateVersionRef.current = data.stateVersion;
+      }
       if (data && data.state) {
         skipNextServerSyncRef.current = true;
         setDb(data.state);
@@ -409,7 +421,6 @@ export default function App() {
           setLoggedInUserId(null);
           setActiveTenantInfo(null);
           setImpersonatorInfo(null);
-          setSessionTokenId(null);
           setDbLoaded(false);
           setIsolationNotice({
             tenantName: data.tenantName,
@@ -439,7 +450,6 @@ export default function App() {
           setLoggedInUserId(null);
           setActiveTenantInfo(null);
           setImpersonatorInfo(null);
-          setSessionTokenId(null);
           setDbLoaded(false);
           setLoginError(
             'Sesi berakhir otomatis karena tidak ada aktivitas selama 30 menit.'
@@ -462,7 +472,6 @@ export default function App() {
           setActiveTenantInfo(data.tenant || null);
           setImpersonatorInfo(data.impersonator || null);
           setIsolationNotice(null);
-          setSessionTokenId(data.sessionId || null);
           await loadAuthorizedDatabaseState();
         } else {
           clearLastActivityTimestamp();
@@ -475,7 +484,6 @@ export default function App() {
           setLoggedInUserId(null);
           setActiveTenantInfo(null);
           setImpersonatorInfo(null);
-          setSessionTokenId(null);
           setDbLoaded(false);
         }
         setAuthChecking(false);
@@ -486,7 +494,6 @@ export default function App() {
         setLoggedInUserId(null);
         setActiveTenantInfo(null);
         setImpersonatorInfo(null);
-        setSessionTokenId(null);
         setAuthChecking(false);
       });
 
@@ -495,7 +502,9 @@ export default function App() {
     };
   }, []);
 
-  // 2. Sync state changes to Backend SQL Database (/api/state/sync) ONLY when authenticated
+  // 2. Sync state changes to Backend SQL Database (/api/state/sync) with debounced coalescing for 10,000+ ONUs
+  const stateSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingUserMutationRef = useRef<boolean>(false);
   useEffect(() => {
     if (!dbLoaded || !loggedInUserId) return;
     if (skipNextServerSyncRef.current) {
@@ -508,51 +517,72 @@ export default function App() {
     const isUserMut = nextSyncIsUserMutationRef.current;
     nextSyncIsUserMutationRef.current = false;
     if (isUserMut) {
+      pendingUserMutationRef.current = true;
       lastUserMutationAtRef.current = Date.now();
     }
 
-    fetch('/api/state/sync', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(!isUserMut ? { 'X-Background-Poll': '1' } : {}),
-      },
-      body: JSON.stringify({
-        state: db,
-        userMutation: isUserMut,
-        allowShrink: isUserMut,
-      }),
-    })
-      .then(async (r) => {
-        if (!r.ok) {
-          const errBody = await r.json().catch(() => null);
-          if (errBody?.error && !errBody?.isolated) {
-            showToast(`⚠ ${errBody.error}`);
-            void loadAuthorizedDatabaseState();
+    if (stateSyncTimerRef.current) {
+      clearTimeout(stateSyncTimerRef.current);
+    }
+    const snapshotDb = db;
+    const delayMs = pendingUserMutationRef.current ? 180 : 500;
+    stateSyncTimerRef.current = setTimeout(() => {
+      stateSyncTimerRef.current = null;
+      const effectiveUserMut = pendingUserMutationRef.current;
+      pendingUserMutationRef.current = false;
+
+      fetch('/api/state/sync', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(!effectiveUserMut ? { 'X-Background-Poll': '1' } : {}),
+        },
+        body: JSON.stringify({
+          state: snapshotDb,
+          userMutation: effectiveUserMut,
+          allowShrink: effectiveUserMut,
+        }),
+      })
+        .then(async (r) => {
+          if (!r.ok) {
+            const errBody = await r.json().catch(() => null);
+            if (errBody?.error && !errBody?.isolated) {
+              showToast(`⚠ ${errBody.error}`);
+              void loadAuthorizedDatabaseState();
+            }
+            return null;
           }
-          return null;
-        }
-        return r.json();
-      })
-      .then((data) => {
-        if (
-          !isUserMut &&
-          Date.now() - lastUserMutationAtRef.current > 5000 &&
-          data &&
-          data.state &&
-          ((Array.isArray(data.state.olts) && data.state.olts.length > db.olts.length) ||
-            (Array.isArray(data.state.onus) && data.state.onus.length > db.onus.length) ||
-            (Array.isArray(data.state.odbs) && data.state.odbs.length > db.odbs.length) ||
-            (Array.isArray(data.state.sectors) &&
-              data.state.sectors.length > (db.sectors?.length || 0)))
-        ) {
-          skipNextServerSyncRef.current = true;
-          setDb((prev) => mergeLiveOltStatePreservingUserMetadata(prev, data.state));
-        }
-      })
-      .catch(() => {
-        // ignore transient network error
-      });
+          return r.json();
+        })
+        .then((data) => {
+          if (typeof data?.stateVersion === 'number') {
+            serverStateVersionRef.current = data.stateVersion;
+          }
+          if (
+            !effectiveUserMut &&
+            Date.now() - lastUserMutationAtRef.current > 5000 &&
+            data &&
+            data.state &&
+            ((Array.isArray(data.state.olts) && data.state.olts.length > snapshotDb.olts.length) ||
+              (Array.isArray(data.state.onus) && data.state.onus.length > snapshotDb.onus.length) ||
+              (Array.isArray(data.state.odbs) && data.state.odbs.length > snapshotDb.odbs.length) ||
+              (Array.isArray(data.state.sectors) &&
+                data.state.sectors.length > (snapshotDb.sectors?.length || 0)))
+          ) {
+            skipNextServerSyncRef.current = true;
+            setDb((prev) => mergeLiveOltStatePreservingUserMetadata(prev, data.state));
+          }
+        })
+        .catch(() => {
+          // ignore transient network error
+        });
+    }, delayMs);
+
+    return () => {
+      if (stateSyncTimerRef.current) {
+        clearTimeout(stateSyncTimerRef.current);
+      }
+    };
   }, [db, dbLoaded, loggedInUserId]);
 
   const [activeView, setActiveView] = useState<NavigationView>('DASHBOARD');
@@ -926,11 +956,13 @@ export default function App() {
   }, [loggedInUserId, activeTenantInfo?.id]);
 
   useEffect(() => {
+    if (activeView !== 'UNCONFIGURED') return;
+    setUncfgNowMs(Date.now());
     const timer = setInterval(() => {
       setUncfgNowMs(Date.now());
     }, 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [activeView]);
 
   const getUnconfiguredWaitingInfo = (
     u: OnuRecord,
@@ -1227,24 +1259,19 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   const [graphsPollingLive, setGraphsPollingLive] = useState<boolean>(false);
   const [graphsFilterType, setGraphsFilterType] = useState<'ALL' | 'UPLINK' | 'PON'>('ALL');
   const [graphsShowAllPon, setGraphsShowAllPon] = useState<boolean>(true);
-  const [graphsOverviewPeriod, setGraphsOverviewPeriod] = useState<
-    'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
-  >('Live2h');
   const [graphsGridMode, setGraphsGridMode] = useState<'1x1' | '2x1' | '4x1'>('2x1');
-  const [selectedGraphInterfaceName, setSelectedGraphInterfaceName] = useState<string | null>(null);
-  const [selectedGraphPeriod, setSelectedGraphPeriod] = useState<
-    'ALL_PERIODS' | 'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
-  >('ALL_PERIODS');
   const [jakartaClockStr, setJakartaClockStr] = useState<string>(() =>
     formatJakartaDateTime()
   );
 
   useEffect(() => {
+    if (activeView !== 'GRAPHS') return;
+    setJakartaClockStr(formatJakartaDateTime());
     const timer = setInterval(() => {
       setJakartaClockStr(formatJakartaDateTime());
     }, 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [activeView]);
 
   const fetchOltGraphs = async (targetOltId: number) => {
     setGraphsLoading(true);
@@ -1453,7 +1480,6 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     setLoggedInUserId(null);
     setActiveTenantInfo(null);
     setImpersonatorInfo(null);
-    setSessionTokenId(null);
     setDbLoaded(false);
     setOpenDropdown(null);
     setAuthorizingOnu(null);
@@ -1625,7 +1651,6 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             setAuthenticatedUser(data.user);
             setActiveTenantInfo(data.tenant || null);
             setImpersonatorInfo(data.impersonator || null);
-            setSessionTokenId(data.sessionId || null);
           }
         } catch {
           // ignore transient network glitch
@@ -1692,7 +1717,6 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       setActiveTenantInfo(data.tenant || null);
       setImpersonatorInfo(data.impersonator || null);
       setIsolationNotice(null);
-      setSessionTokenId(data.sessionId || null);
       setLoginPassword('');
       setActiveView('DASHBOARD');
 
@@ -1735,7 +1759,6 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     setLoggedInUserId(nextUser.id);
     setActiveTenantInfo(nextTenant);
     setImpersonatorInfo(nextImp);
-    setSessionTokenId(data.sessionId || null);
     setActiveView('DASHBOARD');
     await loadAuthorizedDatabaseState();
     void loadBrandingFromServer(false);
@@ -1766,7 +1789,6 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       setLoggedInUserId(data.user.id);
       setActiveTenantInfo(null);
       setImpersonatorInfo(null);
-      setSessionTokenId(data.sessionId || null);
       setActiveView('TENANTS');
       await loadAuthorizedDatabaseState();
       void loadBrandingFromServer(false);
@@ -1881,7 +1903,6 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       if (data.impersonator !== undefined) {
         setImpersonatorInfo(data.impersonator || null);
       }
-      setSessionTokenId(data.sessionId || null);
       setActiveView('DASHBOARD');
       await loadAuthorizedDatabaseState();
       showToast(
@@ -2123,8 +2144,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   const [newSpeedTcontId, setNewSpeedTcontId] = useState<number>(1);
   const [newTcontName, setNewTcontName] = useState<string>('SMARTOLT-100M-UP');
   const [newTcontDbaType, setNewTcontDbaType] = useState<1 | 2 | 3 | 4 | 5>(4);
-  const [newTcontFixedKbps, setNewTcontFixedKbps] = useState<number>(0);
-  const [newTcontAssuredKbps, setNewTcontAssuredKbps] = useState<number>(10240);
+  const newTcontFixedKbps = 0;
+  const newTcontAssuredKbps = 10240;
   const [newTcontMaxKbps, setNewTcontMaxKbps] = useState<number>(102400);
 
   // Add ONU Type Modal State
@@ -2916,277 +2937,424 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     }
   };
 
+  // Pre-indexed O(1) lookup Maps so 10,000+ ONUs filter/sort/render with zero O(N*M) scans
+  const oltsById = useMemo(() => {
+    const map = new Map<number, OltRecord>();
+    for (const o of db.olts) map.set(o.id, o);
+    return map;
+  }, [db.olts]);
+
+  const zonesById = useMemo(() => {
+    const map = new Map<number, ZoneRecord>();
+    for (const z of db.zones) map.set(z.id, z);
+    return map;
+  }, [db.zones]);
+
+  const sectorsById = useMemo(() => {
+    const map = new Map<number, SectorRecord>();
+    for (const s of db.sectors || []) map.set(s.id, s);
+    return map;
+  }, [db.sectors]);
+
+  const odbsById = useMemo(() => {
+    const map = new Map<number, OdbRecord>();
+    for (const o of db.odbs) map.set(o.id, o);
+    return map;
+  }, [db.odbs]);
+
+  const vlansById = useMemo(() => {
+    const map = new Map<number, VlanRecord>();
+    for (const v of db.vlans) map.set(v.id, v);
+    return map;
+  }, [db.vlans]);
+
+  const ponPortsById = useMemo(() => {
+    const map = new Map<number, (typeof db.pon_ports)[number]>();
+    for (const p of db.pon_ports || []) map.set(p.id, p);
+    return map;
+  }, [db.pon_ports]);
+
   // Scoped visibility based on logged-in user's assigned OLTs, Zones, and RKs (Sectors & Splitters)
-  const visibleOlts =
-    !currentUser || isAdminUser || currentUser.access_all_olts
-      ? db.olts
-      : db.olts.filter((o) => (currentUser.allowed_olt_ids || []).includes(o.id));
-  const visibleOltIds = new Set(visibleOlts.map((o) => o.id));
+  const { visibleOlts, visibleZones, visibleSectors, visibleOdbs, visibleOnus } = useMemo(() => {
+    const allowedOltSet = new Set(currentUser?.allowed_olt_ids || []);
+    const allowedZoneSet = new Set(currentUser?.allowed_zone_ids || []);
+    const allowedSectorSet = new Set(currentUser?.allowed_sector_ids || []);
+    const allowedOdbSet = new Set(currentUser?.allowed_odb_ids || []);
 
-  const visibleZones =
-    !currentUser || isAdminUser || currentUser.access_all_zones
-      ? db.zones
-      : db.zones.filter((z) => (currentUser.allowed_zone_ids || []).includes(z.id));
-  const visibleZoneIds = new Set(visibleZones.map((z) => z.id));
+    const vOlts =
+      !currentUser || isAdminUser || currentUser.access_all_olts
+        ? db.olts
+        : db.olts.filter((o) => allowedOltSet.has(o.id));
+    const vOltIds = new Set(vOlts.map((o) => o.id));
 
-  const visibleSectors = (db.sectors || []).filter((s) => {
-    if (!currentUser || isAdminUser) return true;
-    const zoneExists =
-      s.zone_id !== null && db.zones.some((z) => z.id === s.zone_id);
-    const zoneOk =
-      currentUser.access_all_zones ||
-      !zoneExists ||
-      (s.zone_id !== null && visibleZoneIds.has(s.zone_id));
-    const rkOk =
-      currentUser.access_all_rks ||
-      (currentUser.allowed_sector_ids || []).includes(s.id);
-    return zoneOk && rkOk;
-  });
-  const visibleSectorIds = new Set(visibleSectors.map((s) => s.id));
+    const vZones =
+      !currentUser || isAdminUser || currentUser.access_all_zones
+        ? db.zones
+        : db.zones.filter((z) => allowedZoneSet.has(z.id));
+    const vZoneIds = new Set(vZones.map((z) => z.id));
 
-  const visibleOdbs = db.odbs.filter((o) => {
-    if (!currentUser || isAdminUser) return true;
-    const zoneExists =
-      o.zone_id !== null &&
-      o.zone_id !== undefined &&
-      db.zones.some((z) => z.id === o.zone_id);
-    const zoneOk =
-      currentUser.access_all_zones ||
-      !zoneExists ||
-      visibleZoneIds.has(o.zone_id);
-    const rkOk =
-      currentUser.access_all_rks ||
-      (currentUser.allowed_odb_ids || []).includes(o.id) ||
-      (o.sector_id !== null &&
-        o.sector_id !== undefined &&
-        visibleSectorIds.has(o.sector_id));
-    return zoneOk && rkOk;
-  });
-  const visibleOdbIds = new Set(visibleOdbs.map((o) => o.id));
+    const vSectors = (db.sectors || []).filter((s) => {
+      if (!currentUser || isAdminUser) return true;
+      const zoneExists = s.zone_id !== null && zonesById.has(s.zone_id);
+      const zoneOk =
+        currentUser.access_all_zones ||
+        !zoneExists ||
+        (s.zone_id !== null && vZoneIds.has(s.zone_id));
+      const rkOk = currentUser.access_all_rks || allowedSectorSet.has(s.id);
+      return zoneOk && rkOk;
+    });
+    const vSectorIds = new Set(vSectors.map((s) => s.id));
 
-  const visibleOnus = db.onus.filter((u) => {
-    if (!currentUser || isAdminUser) return true;
-    // 1. Check OLT assignment
-    if (!currentUser.access_all_olts && !visibleOltIds.has(u.olt_id)) {
-      return false;
-    }
-    // Unconfigured ONUs only have OLT & PON Port, so OLT check suffices
-    if (!u.is_authorized) {
-      return true;
-    }
-    // 2. Check Zone assignment for configured ONUs (allow ONUs synced directly from OLT that have no Zone assigned yet)
-    if (!currentUser.access_all_zones) {
-      const onuOdb = u.odb_id ? db.odbs.find((o) => o.id === u.odb_id) : null;
-      const effectiveZoneId = u.zone_id ?? onuOdb?.zone_id ?? null;
-      if (effectiveZoneId !== null && !visibleZoneIds.has(effectiveZoneId)) {
-        return false;
+    const vOdbs = db.odbs.filter((o) => {
+      if (!currentUser || isAdminUser) return true;
+      const zoneExists =
+        o.zone_id !== null && o.zone_id !== undefined && zonesById.has(o.zone_id);
+      const zoneOk =
+        currentUser.access_all_zones || !zoneExists || vZoneIds.has(o.zone_id);
+      const rkOk =
+        currentUser.access_all_rks ||
+        allowedOdbSet.has(o.id) ||
+        (o.sector_id !== null && o.sector_id !== undefined && vSectorIds.has(o.sector_id));
+      return zoneOk && rkOk;
+    });
+    const vOdbIds = new Set(vOdbs.map((o) => o.id));
+
+    const vOnus: OnuRecord[] = [];
+    for (let i = 0; i < db.onus.length; i++) {
+      const u = db.onus[i];
+      if (currentUser && !isAdminUser) {
+        if (!currentUser.access_all_olts && !vOltIds.has(u.olt_id)) {
+          continue;
+        }
+        if (u.is_authorized) {
+          if (!currentUser.access_all_zones) {
+            const onuOdb = u.odb_id ? odbsById.get(u.odb_id) : undefined;
+            const effectiveZoneId = u.zone_id ?? onuOdb?.zone_id ?? null;
+            if (effectiveZoneId !== null && !vZoneIds.has(effectiveZoneId)) {
+              continue;
+            }
+          }
+          if (!currentUser.access_all_rks) {
+            const hasAnyRkAssigned =
+              (u.sector_id !== null && u.sector_id !== undefined) || u.odb_id !== null;
+            if (hasAnyRkAssigned) {
+              const matchSector =
+                u.sector_id !== null &&
+                u.sector_id !== undefined &&
+                vSectorIds.has(u.sector_id);
+              const matchOdb = u.odb_id !== null && vOdbIds.has(u.odb_id);
+              if (!matchSector && !matchOdb) {
+                continue;
+              }
+            }
+          }
+        }
+      }
+
+      const parentOlt = oltsById.get(u.olt_id);
+      if (u.is_authorized && parentOlt && parentOlt.status === 'OFFLINE') {
+        vOnus.push({
+          ...u,
+          phase_state: 'OffLine' as const,
+          onu_rx_dbm: null,
+          olt_rx_dbm: null,
+          last_offline_reason: 'OLT Offline',
+        });
+      } else {
+        vOnus.push(u);
       }
     }
-    // 3. Check RK (Sector / Splitter ODP) assignment for configured ONUs (allow ONUs synced from OLT without RK/Splitter yet)
-    if (!currentUser.access_all_rks) {
-      const hasAnyRkAssigned =
-        (u.sector_id !== null && u.sector_id !== undefined) || u.odb_id !== null;
-      if (hasAnyRkAssigned) {
-        const matchSector =
-          u.sector_id !== null &&
-          u.sector_id !== undefined &&
-          visibleSectorIds.has(u.sector_id);
-        const matchOdb = u.odb_id !== null && visibleOdbIds.has(u.odb_id);
-        if (!matchSector && !matchOdb) {
-          return false;
+
+    return {
+      visibleOlts: vOlts,
+      visibleZones: vZones,
+      visibleSectors: vSectors,
+      visibleOdbs: vOdbs,
+      visibleOnus: vOnus,
+    };
+  }, [db.olts, db.zones, db.sectors, db.odbs, db.onus, currentUser, isAdminUser, oltsById, zonesById, odbsById]);
+
+  const scopedDb = useMemo<SmartOltDatabaseState>(
+    () => ({
+      ...db,
+      olts: visibleOlts,
+      zones: visibleZones,
+      sectors: visibleSectors,
+      odbs: visibleOdbs,
+      onus: visibleOnus,
+    }),
+    [db, visibleOlts, visibleZones, visibleSectors, visibleOdbs, visibleOnus]
+  );
+
+  // Single-pass O(N) classification for 10,000+ ONUs + O(1) aggregate counts by Zone/Sector/ODB
+  const {
+    unconfiguredOnus,
+    configuredOnus,
+    onlineOnus,
+    losOnus,
+    pwrFailOnus,
+    otherOfflineOnus,
+    totalOfflineCount,
+    warningSignalOnus,
+    criticalSignalOnus,
+    totalLowSignalCount,
+    sectorCountByZoneId,
+    odbCountByZoneId,
+    odbCountBySectorId,
+    onuCountByZoneId,
+    onuCountBySectorId,
+    onuCountByOdbId,
+  } = useMemo(() => {
+    const uncfg: OnuRecord[] = [];
+    const cfg: OnuRecord[] = [];
+    const online: OnuRecord[] = [];
+    const los: OnuRecord[] = [];
+    const pwrFail: OnuRecord[] = [];
+    const otherOffline: OnuRecord[] = [];
+    const warnSig: OnuRecord[] = [];
+    const critSig: OnuRecord[] = [];
+    const lowSig: OnuRecord[] = [];
+
+    const secByZone = new Map<number, number>();
+    for (const s of visibleSectors) {
+      if (s.zone_id !== null && s.zone_id !== undefined) {
+        secByZone.set(s.zone_id, (secByZone.get(s.zone_id) || 0) + 1);
+      }
+    }
+
+    const odbByZone = new Map<number, number>();
+    const odbBySec = new Map<number, number>();
+    for (const sp of visibleOdbs) {
+      if (sp.zone_id !== null && sp.zone_id !== undefined) {
+        odbByZone.set(sp.zone_id, (odbByZone.get(sp.zone_id) || 0) + 1);
+      }
+      if (sp.sector_id !== null && sp.sector_id !== undefined) {
+        odbBySec.set(sp.sector_id, (odbBySec.get(sp.sector_id) || 0) + 1);
+      }
+    }
+
+    const onuByZone = new Map<number, number>();
+    const onuBySec = new Map<number, number>();
+    const onuByOdb = new Map<number, number>();
+
+    for (let i = 0; i < visibleOnus.length; i++) {
+      const o = visibleOnus[i];
+      if (!o.is_authorized) {
+        const parentOlt = oltsById.get(o.olt_id);
+        if (!parentOlt || parentOlt.status !== 'OFFLINE') {
+          uncfg.push(o);
+        }
+        continue;
+      }
+
+      cfg.push(o);
+      if (o.zone_id !== null && o.zone_id !== undefined) {
+        onuByZone.set(o.zone_id, (onuByZone.get(o.zone_id) || 0) + 1);
+      }
+      if (o.sector_id !== null && o.sector_id !== undefined) {
+        onuBySec.set(o.sector_id, (onuBySec.get(o.sector_id) || 0) + 1);
+      }
+      if (o.odb_id !== null && o.odb_id !== undefined) {
+        onuByOdb.set(o.odb_id, (onuByOdb.get(o.odb_id) || 0) + 1);
+      }
+
+      if (o.phase_state === 'working') {
+        online.push(o);
+      } else if (o.phase_state === 'LOS') {
+        los.push(o);
+      } else if (o.phase_state === 'DyingGasp') {
+        pwrFail.push(o);
+      } else {
+        otherOffline.push(o);
+      }
+
+      if (o.onu_rx_dbm !== null && o.onu_rx_dbm <= -27.0) {
+        lowSig.push(o);
+        if (o.onu_rx_dbm <= -30.0) {
+          critSig.push(o);
+        } else {
+          warnSig.push(o);
         }
       }
     }
-    return true;
-  }).map((u) => {
-    const parentOlt = db.olts.find((o) => o.id === u.olt_id);
-    if (u.is_authorized && parentOlt && parentOlt.status === 'OFFLINE') {
-      return {
-        ...u,
-        phase_state: 'OffLine' as const,
-        onu_rx_dbm: null,
-        olt_rx_dbm: null,
-        last_offline_reason: 'OLT Offline',
-      };
-    }
-    return u;
-  });
 
-  const scopedDb: SmartOltDatabaseState = {
-    ...db,
-    olts: visibleOlts,
-    zones: visibleZones,
-    sectors: visibleSectors,
-    odbs: visibleOdbs,
-    onus: visibleOnus,
-  };
+    return {
+      unconfiguredOnus: uncfg,
+      configuredOnus: cfg,
+      onlineOnus: online,
+      losOnus: los,
+      pwrFailOnus: pwrFail,
+      otherOfflineOnus: otherOffline,
+      totalOfflineCount: pwrFail.length + otherOffline.length,
+      warningSignalOnus: warnSig,
+      criticalSignalOnus: critSig,
+      totalLowSignalCount: lowSig.length,
+      sectorCountByZoneId: secByZone,
+      odbCountByZoneId: odbByZone,
+      odbCountBySectorId: odbBySec,
+      onuCountByZoneId: onuByZone,
+      onuCountBySectorId: onuBySec,
+      onuCountByOdbId: onuByOdb,
+    };
+  }, [visibleOnus, visibleSectors, visibleOdbs, oltsById]);
 
-  // Jika OLT dalam keadaan OFFLINE (mati), ONU unconfigured pada OLT tersebut tidak ditampilkan
-  const unconfiguredOnus = visibleOnus.filter((o) => {
-    if (o.is_authorized) return false;
-    const parentOlt = db.olts.find((olt) => olt.id === o.olt_id);
-    if (parentOlt && parentOlt.status === 'OFFLINE') return false;
-    return true;
-  });
-  const configuredOnus = visibleOnus.filter((o) => o.is_authorized);
-  const onlineOnus = configuredOnus.filter((o) => o.phase_state === 'working');
-  const losOnus = configuredOnus.filter((o) => o.phase_state === 'LOS');
-  const pwrFailOnus = configuredOnus.filter((o) => o.phase_state === 'DyingGasp');
-  const otherOfflineOnus = configuredOnus.filter(
-    (o) =>
-      o.phase_state !== 'working' &&
-      o.phase_state !== 'LOS' &&
-      o.phase_state !== 'DyingGasp'
-  );
-  // Total Offline = ONU yang offline (PwrFail / DyingGasp + Offline / N/A), sedangkan ONU Loss masuk ke kartu ONU Loss tersendiri
-  const totalOfflineCount = pwrFailOnus.length + otherOfflineOnus.length;
-  // Redaman > 27 dB (<= -27.0 dBm) masuk ke Low Signals (Warning: -27.0 s/d -29.99 dBm, Critical: <= -30.0 dBm)
-  const warningSignalOnus = configuredOnus.filter(
-    (o) => o.onu_rx_dbm !== null && o.onu_rx_dbm <= -27.0 && o.onu_rx_dbm > -30.0
-  );
-  const criticalSignalOnus = configuredOnus.filter(
-    (o) => o.onu_rx_dbm !== null && o.onu_rx_dbm <= -30.0
-  );
-  const lowSignalOnus = configuredOnus.filter(
-    (o) => o.onu_rx_dbm !== null && o.onu_rx_dbm <= -27.0
-  );
-  const totalLowSignalCount = lowSignalOnus.length;
+  const deferredSearchQuery = useDeferredValue(searchQuery);
 
-  // Filtered Configured ONUs
-  const filteredConfiguredOnus = configuredOnus.filter((o) => {
-    if (filterOlt !== 'ANY' && o.olt_id !== Number(filterOlt)) return false;
-    if (filterBoard !== 'ANY' && o.board !== Number(filterBoard)) return false;
-    if (filterPort !== 'ANY' && o.port !== Number(filterPort)) return false;
-    if (filterZone !== 'ANY' && o.zone_id !== Number(filterZone)) return false;
-    if (filterSplitter !== 'ANY' && o.odb_id !== Number(filterSplitter)) return false;
-    if (filterVlan !== 'ANY' && o.vlan_id !== Number(filterVlan)) return false;
+  // Filtered Configured ONUs (memoized + deferred search for smooth typing with 10,000+ ONUs)
+  const filteredConfiguredOnus = useMemo(() => {
+    const fOltNum = filterOlt === 'ANY' ? null : Number(filterOlt);
+    const fBoardNum = filterBoard === 'ANY' ? null : Number(filterBoard);
+    const fPortNum = filterPort === 'ANY' ? null : Number(filterPort);
+    const fZoneNum = filterZone === 'ANY' ? null : Number(filterZone);
+    const fSplitterNum = filterSplitter === 'ANY' ? null : Number(filterSplitter);
+    const fVlanNum = filterVlan === 'ANY' ? null : Number(filterVlan);
+    const q = deferredSearchQuery.trim().toLowerCase();
 
-    if (filterPhaseStatus !== 'ALL') {
-      if (filterPhaseStatus === 'ONLINE' && o.phase_state !== 'working') return false;
-      if (
-        filterPhaseStatus === 'OFFLINE' &&
-        (o.phase_state === 'working' || o.phase_state === 'LOS')
-      )
-        return false;
-      if (filterPhaseStatus === 'LOS' && o.phase_state !== 'LOS') return false;
-      if (filterPhaseStatus === 'PWRFAIL' && o.phase_state !== 'DyingGasp') return false;
-      if (
-        filterPhaseStatus === 'OFFLINE_NA' &&
-        (o.phase_state === 'working' ||
-          o.phase_state === 'LOS' ||
-          o.phase_state === 'DyingGasp')
-      )
-        return false;
-    }
+    return configuredOnus.filter((o) => {
+      if (fOltNum !== null && o.olt_id !== fOltNum) return false;
+      if (fBoardNum !== null && o.board !== fBoardNum) return false;
+      if (fPortNum !== null && o.port !== fPortNum) return false;
+      if (fZoneNum !== null && o.zone_id !== fZoneNum) return false;
+      if (fSplitterNum !== null && o.odb_id !== fSplitterNum) return false;
+      if (fVlanNum !== null && o.vlan_id !== fVlanNum) return false;
 
-    if (filterSignalLevel !== 'ALL') {
-      const rx = o.onu_rx_dbm;
-      if (filterSignalLevel === 'GOOD' && (rx === null || rx <= -27.0)) return false;
-      if (filterSignalLevel === 'LOW' && (rx === null || rx > -27.0)) return false;
-      if (filterSignalLevel === 'WARNING' && (rx === null || rx > -27.0 || rx <= -30.0))
-        return false;
-      if (filterSignalLevel === 'CRITICAL' && (rx === null || rx > -30.0))
-        return false;
-    }
+      if (filterPhaseStatus !== 'ALL') {
+        if (filterPhaseStatus === 'ONLINE' && o.phase_state !== 'working') return false;
+        if (
+          filterPhaseStatus === 'OFFLINE' &&
+          (o.phase_state === 'working' || o.phase_state === 'LOS')
+        )
+          return false;
+        if (filterPhaseStatus === 'LOS' && o.phase_state !== 'LOS') return false;
+        if (filterPhaseStatus === 'PWRFAIL' && o.phase_state !== 'DyingGasp') return false;
+        if (
+          filterPhaseStatus === 'OFFLINE_NA' &&
+          (o.phase_state === 'working' ||
+            o.phase_state === 'LOS' ||
+            o.phase_state === 'DyingGasp')
+        )
+          return false;
+      }
 
-    if (searchQuery.trim() !== '') {
-      const q = searchQuery.toLowerCase();
-      const matchName = (o.customer_name || '').toLowerCase().includes(q);
-      const matchSn = o.serial_number.toLowerCase().includes(q);
-      const matchPppoe = (o.pppoe_username || '').toLowerCase().includes(q);
-      if (!matchName && !matchSn && !matchPppoe) return false;
-    }
-    return true;
-  });
+      if (filterSignalLevel !== 'ALL') {
+        const rx = o.onu_rx_dbm;
+        if (filterSignalLevel === 'GOOD' && (rx === null || rx <= -27.0)) return false;
+        if (filterSignalLevel === 'LOW' && (rx === null || rx > -27.0)) return false;
+        if (filterSignalLevel === 'WARNING' && (rx === null || rx > -27.0 || rx <= -30.0))
+          return false;
+        if (filterSignalLevel === 'CRITICAL' && (rx === null || rx > -30.0)) return false;
+      }
 
-  const sortedConfiguredOnus = [...filteredConfiguredOnus].sort((a, b) => {
-    if (configuredSortField === 'NONE') return 0;
+      if (q !== '') {
+        const matchName = (o.customer_name || '').toLowerCase().includes(q);
+        const matchSn = o.serial_number.toLowerCase().includes(q);
+        const matchPppoe = (o.pppoe_username || '').toLowerCase().includes(q);
+        if (!matchName && !matchSn && !matchPppoe) return false;
+      }
+      return true;
+    });
+  }, [
+    configuredOnus,
+    filterOlt,
+    filterBoard,
+    filterPort,
+    filterZone,
+    filterSplitter,
+    filterVlan,
+    filterPhaseStatus,
+    filterSignalLevel,
+    deferredSearchQuery,
+  ]);
+
+  const sortedConfiguredOnus = useMemo(() => {
+    if (configuredSortField === 'NONE') return filteredConfiguredOnus;
     const dir = configuredSortDir === 'asc' ? 1 : -1;
+    const rank = (s: string) =>
+      s === 'working' ? 1 : s === 'DyingGasp' ? 2 : s === 'LOS' ? 3 : 4;
 
-    switch (configuredSortField) {
-      case 'STATUS': {
-        const rank = (s: string) =>
-          s === 'working' ? 1 : s === 'DyingGasp' ? 2 : s === 'LOS' ? 3 : 4;
-        return (rank(a.phase_state) - rank(b.phase_state)) * dir;
+    return [...filteredConfiguredOnus].sort((a, b) => {
+      switch (configuredSortField) {
+        case 'STATUS':
+          return (rank(a.phase_state) - rank(b.phase_state)) * dir;
+        case 'NAME':
+          return (
+            (a.customer_name || '').localeCompare(
+              b.customer_name || '',
+              undefined,
+              { numeric: true, sensitivity: 'base' }
+            ) * dir
+          );
+        case 'SN':
+          return (
+            a.serial_number.localeCompare(b.serial_number, undefined, {
+              numeric: true,
+              sensitivity: 'base',
+            }) * dir
+          );
+        case 'OLT':
+          return (
+            (a.olt_id - b.olt_id ||
+              a.board - b.board ||
+              a.port - b.port ||
+              (a.onu_index ?? 0) - (b.onu_index ?? 0)) * dir
+          );
+        case 'BOARD':
+          return (a.board - b.board || a.port - b.port) * dir;
+        case 'PORT':
+          return (a.port - b.port || (a.onu_index ?? 0) - (b.onu_index ?? 0)) * dir;
+        case 'ZONE': {
+          const zA = (a.zone_id ? zonesById.get(a.zone_id)?.name : '') || '';
+          const zB = (b.zone_id ? zonesById.get(b.zone_id)?.name : '') || '';
+          if (!zA && zB) return 1;
+          if (zA && !zB) return -1;
+          return (
+            zA.localeCompare(zB, undefined, {
+              numeric: true,
+              sensitivity: 'base',
+            }) * dir
+          );
+        }
+        case 'SPLITTER': {
+          const spA = (a.odb_id ? odbsById.get(a.odb_id)?.name : '') || '';
+          const spB = (b.odb_id ? odbsById.get(b.odb_id)?.name : '') || '';
+          if (!spA && spB) return 1;
+          if (spA && !spB) return -1;
+          return (
+            spA.localeCompare(spB, undefined, {
+              numeric: true,
+              sensitivity: 'base',
+            }) * dir
+          );
+        }
+        case 'SIGNAL': {
+          const rxA = a.onu_rx_dbm;
+          const rxB = b.onu_rx_dbm;
+          if (rxA === null && rxB === null) return 0;
+          if (rxA === null) return 1;
+          if (rxB === null) return -1;
+          return (rxA - rxB) * dir;
+        }
+        case 'MODE':
+          return (a.wan_mode || '').localeCompare(b.wan_mode || '') * dir;
+        case 'VLAN': {
+          const vA = (a.vlan_id ? vlansById.get(a.vlan_id)?.vlan_id : undefined) ?? 99999;
+          const vB = (b.vlan_id ? vlansById.get(b.vlan_id)?.vlan_id : undefined) ?? 99999;
+          return (vA - vB) * dir;
+        }
+        case 'METHOD':
+          return (a.config_method || 'OMCI').localeCompare(b.config_method || 'OMCI') * dir;
+        case 'TYPE':
+          return (a.onu_type || '').localeCompare(b.onu_type || '') * dir;
+        case 'AUTH_DATE': {
+          const dA = a.auth_date_label || (a.last_online_at || '').slice(0, 10);
+          const dB = b.auth_date_label || (b.last_online_at || '').slice(0, 10);
+          return dA.localeCompare(dB) * dir;
+        }
+        default:
+          return 0;
       }
-      case 'NAME':
-        return (
-          (a.customer_name || '').localeCompare(
-            b.customer_name || '',
-            undefined,
-            { numeric: true, sensitivity: 'base' }
-          ) * dir
-        );
-      case 'SN':
-        return (
-          a.serial_number.localeCompare(b.serial_number, undefined, {
-            numeric: true,
-            sensitivity: 'base',
-          }) * dir
-        );
-      case 'OLT':
-        return (
-          (a.olt_id - b.olt_id ||
-            a.board - b.board ||
-            a.port - b.port ||
-            (a.onu_index ?? 0) - (b.onu_index ?? 0)) * dir
-        );
-      case 'BOARD':
-        return (a.board - b.board || a.port - b.port) * dir;
-      case 'PORT':
-        return (a.port - b.port || (a.onu_index ?? 0) - (b.onu_index ?? 0)) * dir;
-      case 'ZONE': {
-        const zA = db.zones.find((z) => z.id === a.zone_id)?.name || '';
-        const zB = db.zones.find((z) => z.id === b.zone_id)?.name || '';
-        if (!zA && zB) return 1;
-        if (zA && !zB) return -1;
-        return (
-          zA.localeCompare(zB, undefined, {
-            numeric: true,
-            sensitivity: 'base',
-          }) * dir
-        );
-      }
-      case 'SPLITTER': {
-        const spA = db.odbs.find((s) => s.id === a.odb_id)?.name || '';
-        const spB = db.odbs.find((s) => s.id === b.odb_id)?.name || '';
-        if (!spA && spB) return 1;
-        if (spA && !spB) return -1;
-        return (
-          spA.localeCompare(spB, undefined, {
-            numeric: true,
-            sensitivity: 'base',
-          }) * dir
-        );
-      }
-      case 'SIGNAL': {
-        const rxA = a.onu_rx_dbm;
-        const rxB = b.onu_rx_dbm;
-        if (rxA === null && rxB === null) return 0;
-        if (rxA === null) return 1;
-        if (rxB === null) return -1;
-        return (rxA - rxB) * dir;
-      }
-      case 'MODE':
-        return (a.wan_mode || '').localeCompare(b.wan_mode || '') * dir;
-      case 'VLAN': {
-        const vA = db.vlans.find((v) => v.id === a.vlan_id)?.vlan_id ?? 99999;
-        const vB = db.vlans.find((v) => v.id === b.vlan_id)?.vlan_id ?? 99999;
-        return (vA - vB) * dir;
-      }
-      case 'METHOD':
-        return (a.config_method || 'OMCI').localeCompare(b.config_method || 'OMCI') * dir;
-      case 'TYPE':
-        return (a.onu_type || '').localeCompare(b.onu_type || '') * dir;
-      case 'AUTH_DATE': {
-        const dA = a.auth_date_label || (a.last_online_at || '').slice(0, 10);
-        const dB = b.auth_date_label || (b.last_online_at || '').slice(0, 10);
-        return dA.localeCompare(dB) * dir;
-      }
-      default:
-        return 0;
-    }
-  });
+    });
+  }, [filteredConfiguredOnus, configuredSortField, configuredSortDir, zonesById, odbsById, vlansById]);
 
   const totalConfiguredPages = Math.max(
     1,
@@ -3196,9 +3364,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     Math.max(1, configuredOnusPage),
     totalConfiguredPages
   );
-  const paginatedConfiguredOnus = sortedConfiguredOnus.slice(
-    (activeConfiguredPage - 1) * configuredOnusPerPage,
-    activeConfiguredPage * configuredOnusPerPage
+  const paginatedConfiguredOnus = useMemo(
+    () =>
+      sortedConfiguredOnus.slice(
+        (activeConfiguredPage - 1) * configuredOnusPerPage,
+        activeConfiguredPage * configuredOnusPerPage
+      ),
+    [sortedConfiguredOnus, activeConfiguredPage, configuredOnusPerPage]
   );
 
   const buildVisiblePageNumbers = (
@@ -6962,9 +7134,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             {/* Mobile Card List for Configured ONUs (md:hidden) */}
             <div className="grid grid-cols-1 gap-2.5 md:hidden">
               {paginatedConfiguredOnus.map((o) => {
-                const z = db.zones.find((item) => item.id === o.zone_id);
-                const sp = db.odbs.find((item) => item.id === o.odb_id);
-                const vl = db.vlans.find((item) => item.id === o.vlan_id);
+                const z = o.zone_id ? zonesById.get(o.zone_id) : undefined;
+                const sp = o.odb_id ? odbsById.get(o.odb_id) : undefined;
+                const vl = o.vlan_id ? vlansById.get(o.vlan_id) : undefined;
                 const isOnline = o.phase_state === 'working';
                 const isPwrFail = o.phase_state === 'DyingGasp';
                 const isLos = o.phase_state === 'LOS';
@@ -7103,12 +7275,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </thead>
                 <tbody className="divide-y divide-slate-800/70">
                   {paginatedConfiguredOnus.map((o) => {
-                    const z = db.zones.find((item) => item.id === o.zone_id);
-                    const sec = (db.sectors || []).find(
-                      (item) => item.id === o.sector_id
-                    );
-                    const sp = db.odbs.find((item) => item.id === o.odb_id);
-                    const vl = db.vlans.find((item) => item.id === o.vlan_id);
+                    const z = o.zone_id ? zonesById.get(o.zone_id) : undefined;
+                    const sec = o.sector_id ? sectorsById.get(o.sector_id) : undefined;
+                    const sp = o.odb_id ? odbsById.get(o.odb_id) : undefined;
+                    const vl = o.vlan_id ? vlansById.get(o.vlan_id) : undefined;
                     return (
                       <tr key={o.id} className="hover:bg-slate-800/40">
                         <td className="px-3 py-2.5">
@@ -9215,24 +9385,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             );
                           })
                           .map((z) => {
-                            const secCount = (db.sectors || []).filter(
-                              (s) => s.zone_id === z.id
-                            ).length;
-                            const zoneSplitters = db.odbs.filter(
-                              (o) => o.zone_id === z.id
-                            );
-                            const spCount = zoneSplitters.length;
-                            const zoneSplitterIds = new Set(
-                              zoneSplitters.map((o) => o.id)
-                            );
-                            const attachedZoneOnus = db.onus.filter(
-                              (u) =>
-                                u.is_authorized &&
-                                (u.zone_id === z.id ||
-                                  (u.odb_id !== null &&
-                                    zoneSplitterIds.has(u.odb_id)))
-                            );
-                            const onuCount = attachedZoneOnus.length;
+                            const secCount = sectorCountByZoneId.get(z.id) || 0;
+                            const spCount = odbCountByZoneId.get(z.id) || 0;
+                            const onuCount = onuCountByZoneId.get(z.id) || 0;
                             const isZoneDeleteLocked = onuCount > 0;
                             return (
                               <tr key={z.id} className="hover:bg-[#132842]/60">
@@ -9585,17 +9740,11 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             );
                           })
                           .map((s) => {
-                            const zObj = db.zones.find((z) => z.id === s.zone_id);
-                            const oObj = db.olts.find((o) => o.id === s.olt_id);
-                            const pObj = db.pon_ports.find(
-                              (p) => p.id === s.pon_port_id
-                            );
-                            const spCount = db.odbs.filter(
-                              (o) => o.sector_id === s.id
-                            ).length;
-                            const onuCount = db.onus.filter(
-                              (u) => u.is_authorized && u.sector_id === s.id
-                            ).length;
+                            const zObj = s.zone_id ? zonesById.get(s.zone_id) : undefined;
+                            const oObj = s.olt_id ? oltsById.get(s.olt_id) : undefined;
+                            const pObj = s.pon_port_id ? ponPortsById.get(s.pon_port_id) : undefined;
+                            const spCount = odbCountBySectorId.get(s.id) || 0;
+                            const onuCount = onuCountBySectorId.get(s.id) || 0;
                             return (
                               <tr key={s.id} className="hover:bg-[#132842]/60">
                                 <td className="px-4 py-3 font-mono text-white">
@@ -10011,16 +10160,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             );
                           })
                           .map((o) => {
-                            const zObj = db.zones.find(
-                              (z) => z.id === o.zone_id
-                            );
-                            const secObj = (db.sectors || []).find(
-                              (s) => s.id === o.sector_id
-                            );
-                            const attachedOnus = db.onus.filter(
-                              (u) => u.is_authorized && u.odb_id === o.id
-                            );
-                            const usedPorts = attachedOnus.length;
+                            const zObj = o.zone_id ? zonesById.get(o.zone_id) : undefined;
+                            const secObj = o.sector_id ? sectorsById.get(o.sector_id) : undefined;
+                            const usedPorts = onuCountByOdbId.get(o.id) || 0;
                             const pct = Math.min(
                               100,
                               Math.round((usedPorts / (o.total_ports || 8)) * 100)
@@ -12161,7 +12303,6 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             onChange={(e) => {
                               const nextId = Number(e.target.value);
                               setGraphsOltId(nextId);
-                              setSelectedGraphInterfaceName(null);
                             }}
                             className="min-w-0 flex-1 rounded-lg border border-slate-600 bg-[#132842] px-2.5 py-1.5 font-bold text-white sm:flex-none"
                           >
@@ -12193,7 +12334,6 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                               type="button"
                               onClick={() => {
                                 setGraphsFilterType(tab.id);
-                                setSelectedGraphInterfaceName(null);
                               }}
                               className={`truncate rounded-md px-2 py-1 text-[11px] font-bold transition sm:px-2.5 sm:text-xs ${
                                 graphsFilterType === tab.id

@@ -2400,7 +2400,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           onu={onu}
           db={db}
           onClose={() => setShowUpdateModeModal(false)}
-          onConfirmUpdate={(onuId, updatedFields, generatedCli) => {
+          onConfirmUpdate={(_onuId, updatedFields, generatedCli) => {
             setShowUpdateModeModal(false);
             void executeAndDisplayLivePush(
               'UPDATE_ONU_MODE',

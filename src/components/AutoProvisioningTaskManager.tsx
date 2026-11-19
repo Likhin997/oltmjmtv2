@@ -26,9 +26,7 @@ import {
   Check,
   X,
   ArrowUpDown,
-  Lock,
   Terminal,
-  Activity,
 } from 'lucide-react';
 import {
   SmartOltDatabaseState,
@@ -39,10 +37,8 @@ import {
 } from '../services/mockDatabase';
 import {
   generateAuthorizeCliScript,
-  findNextAvailableOnuIndex,
   OnuModeOption,
   WanModeOption,
-  ConfigMethodOption,
 } from '../services/oltEngine';
 import { SearchableSplitterSelect } from './SearchableSplitterSelect';
 
