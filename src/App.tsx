@@ -3676,22 +3676,25 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     // Immediate real-time TCP reachability check for all OLTs
     void pollOltRealtimeStatus();
     const statusInterval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       void pollOltRealtimeStatus();
-    }, 5000);
+    }, 15000);
     // Initial real-time status & WAN IP poll shortly after load
     const initialTimer = setTimeout(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       void pollRealtimeOltTelemetry();
-    }, 1500);
-    // Continuous real-time poll every 10 seconds
+    }, 2000);
+    // Continuous real-time poll every 15 seconds (serialized on server to max 1 VTY session per OLT)
     const intervalTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       void pollRealtimeOltTelemetry();
-    }, 10000);
+    }, 15000);
     return () => {
       clearInterval(statusInterval);
       clearTimeout(initialTimer);
       clearInterval(intervalTimer);
     };
-  }, [dbLoaded, db.olts.length, selectedOltId, activeView, selectedOnuId]);
+  }, [dbLoaded, db.olts.length, selectedOltId]);
 
   // Central Live OLT CLI Executor — sends commands via Telnet/SSH to the target OLT
   // and updates provisioning_logs + toast with the real OLT execution response.

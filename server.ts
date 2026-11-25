@@ -1767,7 +1767,44 @@ function hasCliPromptAtEnd(buffer: string): {
   };
 }
 
-async function executeTelnetSession(params: {
+// ============================================================================
+// PER-OLT TELNET SESSION MANAGER (Anti Max-Session & Anti User-Lockout Engine)
+// - Serialisasi 1 sesi aktif per OLT (host:port) agar tidak pernah flood VTY
+// - Cooldown jeda 350ms antar sesi supaya ZTE telnetd sempat menutup slot VTY
+// - Circuit breaker otomatis saat ZTE membalas max-session / user locked / auth fail
+// - Graceful logout (`end` -> `exit` -> TCP FIN) agar tidak ada sesi zombie di `show users`
+// ============================================================================
+const oltTelnetChains = new Map<string, Promise<void>>();
+const oltTelnetActiveCount = new Map<string, number>();
+const oltLastSessionClosedAt = new Map<string, number>();
+const oltLastReachableAt = new Map<string, number>();
+const oltAuthCooldownMap = new Map<
+  string,
+  { until: number; reason: string; kind: 'MAX_SESSION' | 'LOCKED' | 'AUTH_FAIL' }
+>();
+const oltTcpProbeCache = new Map<string, { ok: boolean; checkedAt: number }>();
+
+const TELNET_SESSION_GAP_MS = 350;
+const COOLDOWN_MAX_SESSION_MS = 45_000;
+const COOLDOWN_USER_LOCKED_MS = 180_000;
+const COOLDOWN_AUTH_FAIL_MS = 120_000;
+
+const ZTE_LOCKED_REGEX =
+  /(user\s+(?:is\s+)?locked|account\s+(?:is\s+)?locked|has\s+been\s+locked|locked\s+out|temporarily\s+locked|lock(?:ed)?\s+for\s+\d+|too\s+many\s+failed|user\s+forbidden)/i;
+const ZTE_MAX_SESSION_REGEX =
+  /(reach(?:ed)?\s+(?:the\s+)?max(?:imum)?\s*(?:login|session|user|vty)|max(?:imum)?\s*(?:login|session|user|vty)\s*(?:num(?:ber)?|limit|count|reached|exceeded)?|too\s+many\s+(?:users|sessions|connections|telnet)|exceed(?:ed)?\s+(?:the\s+)?max|already\s+log(?:ged\s*)?in|no\s+free\s+vty|vty.*(?:full|busy|exhausted)|session\s+(?:is\s+)?full|login\s+number\s+limit)/i;
+const ZTE_AUTH_FAILED_REGEX =
+  /(authentication\s+failed|login\s+incorrect|bad\s+passwords?|access\s+denied|invalid\s+(?:user(?:name)?|password)|wrong\s+(?:user(?:name)?|password)|login\s+failed|password\s+error|username\s+or\s+password\s+error)/i;
+
+function getOltEndpointKey(host: string, port: number): string {
+  return `${String(host || '').trim().toLowerCase()}:${Number(port) || 23}`;
+}
+
+function getOltCredKey(host: string, port: number, username?: string): string {
+  return `${getOltEndpointKey(host, port)}:${String(username || 'zte').trim().toLowerCase()}`;
+}
+
+function runRawTelnetSession(params: {
   host: string;
   port: number;
   username?: string;
@@ -1782,6 +1819,7 @@ async function executeTelnetSession(params: {
   commandsExecuted: string[];
   durationMs: number;
   error?: string;
+  errorKind?: 'MAX_SESSION' | 'LOCKED' | 'AUTH_FAIL';
 }> {
   const startTime = Date.now();
   const normalizedCmds = normalizeCliCommandsForExecution(params.commands);
@@ -1797,6 +1835,8 @@ async function executeTelnetSession(params: {
     let fullOutput = '';
     let stepBuffer = '';
     let settled = false;
+    let tcpConnected = false;
+    let authenticated = false;
 
     type SessionStage =
       | 'WAIT_USER'
@@ -1804,6 +1844,7 @@ async function executeTelnetSession(params: {
       | 'WAIT_ENABLE_PASS'
       | 'WAIT_PROMPT'
       | 'EXEC_CMDS'
+      | 'LOGOUT'
       | 'DONE';
 
     let stage: SessionStage = 'WAIT_USER';
@@ -1815,11 +1856,17 @@ async function executeTelnetSession(params: {
     let currentPromptMode = '';
     let inConfigTerminal = false;
     let autoReConfigCount = 0;
+    let connectTimer: NodeJS.Timeout | null = null;
     let stepTimer: NodeJS.Timeout | null = null;
     let wakeTimer: NodeJS.Timeout | null = null;
     let promptDebounceTimer: NodeJS.Timeout | null = null;
+    let logoutTimer: NodeJS.Timeout | null = null;
 
     const clearTimers = () => {
+      if (connectTimer) {
+        clearTimeout(connectTimer);
+        connectTimer = null;
+      }
       if (stepTimer) {
         clearTimeout(stepTimer);
         stepTimer = null;
@@ -1832,13 +1879,29 @@ async function executeTelnetSession(params: {
         clearTimeout(promptDebounceTimer);
         promptDebounceTimer = null;
       }
+      if (logoutTimer) {
+        clearTimeout(logoutTimer);
+        logoutTimer = null;
+      }
     };
 
-    const finish = (reachable: boolean, output: string, error?: string) => {
+    const finalizeSocketAndResolve = (
+      reachable: boolean,
+      output: string,
+      error?: string,
+      errorKind?: 'MAX_SESSION' | 'LOCKED' | 'AUTH_FAIL'
+    ) => {
       if (settled) return;
       settled = true;
       clearTimers();
-      socket.destroy();
+      try {
+        if (!socket.destroyed) {
+          socket.end();
+          socket.destroy();
+        }
+      } catch {
+        // ignore
+      }
       resolve({
         ok: reachable && !error,
         reachable,
@@ -1846,7 +1909,83 @@ async function executeTelnetSession(params: {
         commandsExecuted: normalizedCmds,
         durationMs: Date.now() - startTime,
         error,
+        errorKind,
       });
+    };
+
+    /**
+     * Graceful ZTE OLT VTY logout:
+     * Keluar dari mode config (`end`) jika masih berada di dalamnya, kirim `exit\r\n`,
+     * lalu tunggu OLT menutup sesi VTY (TCP FIN) maksimal 1200ms agar slot VTY langsung bebas!
+     */
+    const gracefulLogoutAndFinish = (
+      reachable: boolean,
+      outputSnapshot: string,
+      error?: string,
+      errorKind?: 'MAX_SESSION' | 'LOCKED' | 'AUTH_FAIL'
+    ) => {
+      if (settled) return;
+      if (!authenticated || socket.destroyed || !socket.writable) {
+        finalizeSocketAndResolve(reachable, outputSnapshot, error, errorKind);
+        return;
+      }
+      if (stage === 'LOGOUT') return;
+      stage = 'LOGOUT';
+      clearTimers();
+
+      const onClosed = () => {
+        finalizeSocketAndResolve(reachable, outputSnapshot, error, errorKind);
+      };
+      socket.once('end', onClosed);
+      socket.once('close', onClosed);
+
+      try {
+        if (inConfigTerminal || currentPromptMode !== '') {
+          socket.write('end\r\n');
+          setTimeout(() => {
+            if (!settled && !socket.destroyed && socket.writable) {
+              try {
+                socket.write('exit\r\n');
+              } catch {
+                // ignore
+              }
+            }
+          }, 120);
+        } else {
+          socket.write('exit\r\n');
+        }
+      } catch {
+        finalizeSocketAndResolve(reachable, outputSnapshot, error, errorKind);
+        return;
+      }
+
+      logoutTimer = setTimeout(() => {
+        finalizeSocketAndResolve(reachable, outputSnapshot, error, errorKind);
+      }, 1200);
+    };
+
+    const detectBannerReject = (
+      buf: string
+    ): { kind: 'MAX_SESSION' | 'LOCKED' | 'AUTH_FAIL'; msg: string } | null => {
+      if (ZTE_LOCKED_REGEX.test(buf)) {
+        return {
+          kind: 'LOCKED',
+          msg: 'OLT Telnet user sedang di-LOCK sementara oleh OLT. Polling otomatis dijeda 3 menit agar user terbuka kembali.',
+        };
+      }
+      if (ZTE_MAX_SESSION_REGEX.test(buf)) {
+        return {
+          kind: 'MAX_SESSION',
+          msg: 'OLT Telnet mencapai batas max session VTY. Polling otomatis dijeda 45 detik untuk membebaskan sesi.',
+        };
+      }
+      if (ZTE_AUTH_FAILED_REGEX.test(buf)) {
+        return {
+          kind: 'AUTH_FAIL',
+          msg: 'OLT Telnet authentication failed (invalid username/password). Polling dijeda sementara agar akun tidak terblokir.',
+        };
+      }
+      return null;
     };
 
     const armCommandWatchdog = (cmd: string) => {
@@ -1879,8 +2018,7 @@ async function executeTelnetSession(params: {
       }
 
       if (cmdIndex >= cmdQueue.length) {
-        stage = 'DONE';
-        setTimeout(() => finish(true, fullOutput), 300);
+        gracefulLogoutAndFinish(true, fullOutput);
         return;
       }
 
@@ -1904,8 +2042,7 @@ async function executeTelnetSession(params: {
       }
 
       if (!nextCmd) {
-        stage = 'DONE';
-        setTimeout(() => finish(true, fullOutput), 300);
+        gracefulLogoutAndFinish(true, fullOutput);
         return;
       }
 
@@ -1968,7 +2105,23 @@ async function executeTelnetSession(params: {
 
     socket.setTimeout(timeout);
 
+    // Fast TCP connect timeout (4s) so unreachable OLTs fail immediately without needing a separate pre-probe
+    connectTimer = setTimeout(() => {
+      if (!tcpConnected && !settled) {
+        finalizeSocketAndResolve(
+          false,
+          fullOutput,
+          `TCP connect timed out to ${params.host}:${params.port} (4000ms)`
+        );
+      }
+    }, 4000);
+
     socket.connect(params.port || 23, params.host, () => {
+      tcpConnected = true;
+      if (connectTimer) {
+        clearTimeout(connectTimer);
+        connectTimer = null;
+      }
       // Only send a wakeup CRLF if the OLT sends zero text for 3.5s after TCP connect
       wakeTimer = setTimeout(() => {
         if (stage === 'WAIT_USER' && stepBuffer.trim().length === 0 && !settled) {
@@ -1980,6 +2133,18 @@ async function executeTelnetSession(params: {
     socket.on('data', (rawChunk: Buffer) => {
       const text = handleTelnetIacAndExtractText(socket, rawChunk);
       if (!text) return;
+
+      // During LOGOUT stage, handle ZTE "Save configuration? [yes/no]" -> no, then let OLT close VTY
+      if (stage === 'LOGOUT') {
+        if (/(\[yes\/no\]|\(y\/n\))/i.test(text) && !socket.destroyed && socket.writable) {
+          try {
+            socket.write('no\r\n');
+          } catch {
+            // ignore
+          }
+        }
+        return;
+      }
 
       fullOutput += text;
       stepBuffer += text;
@@ -1997,16 +2162,25 @@ async function executeTelnetSession(params: {
 
       // Handle ZTE/Huawei interactive confirmation prompts: `[yes/no]:`, `(y/n)`, `Confirm to`
       if (
+        stage === 'EXEC_CMDS' &&
         /(\[yes\/no\]|\(y\/n\)|confirm\s+to\s+\w+|are\s+you\s+sure)/i.test(
           stepBuffer
         )
       ) {
         stepBuffer = '';
         socket.write('yes\r\n');
-        if (stage === 'EXEC_CMDS') {
-          armCommandWatchdog(currentCmd);
-        }
+        armCommandWatchdog(currentCmd);
         return;
+      }
+
+      // Check ZTE rejection/lockout/max-session banners at any pre-exec stage
+      if (stage !== 'EXEC_CMDS') {
+        const rejected = detectBannerReject(stepBuffer);
+        if (rejected) {
+          // OLT TCP IS reachable, just rejected login/session — keep reachable=true so OLT isn't falsely flagged OFFLINE!
+          finalizeSocketAndResolve(true, fullOutput, rejected.msg, rejected.kind);
+          return;
+        }
       }
 
       if (stage === 'WAIT_USER') {
@@ -2036,6 +2210,7 @@ async function executeTelnetSession(params: {
             clearTimeout(wakeTimer);
             wakeTimer = null;
           }
+          authenticated = true;
           if (promptCheck.isUserMode) {
             stepBuffer = '';
             stage = 'WAIT_ENABLE_PASS';
@@ -2056,18 +2231,21 @@ async function executeTelnetSession(params: {
         }
         const promptCheck = hasCliPromptAtEnd(stepBuffer);
         if (promptCheck.isPrompt) {
+          authenticated = true;
           stepBuffer = '';
           stage = 'EXEC_CMDS';
           sendNextCommand();
           return;
         }
       } else if (stage === 'WAIT_PROMPT' || stage === 'WAIT_ENABLE_PASS') {
-        if (
-          /(authentication\s+failed|login\s+incorrect|bad\s+passwords?|access\s+denied)/i.test(
-            stepBuffer
-          )
-        ) {
-          finish(false, fullOutput, 'OLT Telnet authentication failed (invalid username/password)');
+        // ZTE re-prompting Username: right after password means login failed or session rejected — abort immediately!
+        if (stage === 'WAIT_PROMPT' && /(username|login|user\s*name)\s*:/i.test(stepBuffer)) {
+          finalizeSocketAndResolve(
+            true,
+            fullOutput,
+            'OLT Telnet menolak login (username/password ditolak atau sesi penuh).',
+            'AUTH_FAIL'
+          );
           return;
         }
         if (stage === 'WAIT_ENABLE_PASS' && /password\s*:/i.test(stepBuffer)) {
@@ -2080,6 +2258,7 @@ async function executeTelnetSession(params: {
         }
         const promptCheck = hasCliPromptAtEnd(stepBuffer);
         if (promptCheck.isPrompt) {
+          authenticated = true;
           if (promptCheck.isUserMode) {
             stepBuffer = '';
             stage = 'WAIT_ENABLE_PASS';
@@ -2122,12 +2301,39 @@ async function executeTelnetSession(params: {
       }
     });
 
+    socket.on('end', () => {
+      if (settled) return;
+      if (stage === 'LOGOUT') {
+        finalizeSocketAndResolve(true, fullOutput);
+        return;
+      }
+      if (stage !== 'EXEC_CMDS') {
+        const rejected = detectBannerReject(fullOutput);
+        if (rejected) {
+          finalizeSocketAndResolve(true, fullOutput, rejected.msg, rejected.kind);
+          return;
+        }
+      }
+      if (fullOutput.length > 0 && stage === 'EXEC_CMDS') {
+        finalizeSocketAndResolve(true, fullOutput);
+      } else if (tcpConnected) {
+        finalizeSocketAndResolve(
+          true,
+          fullOutput,
+          'OLT menutup koneksi Telnet sebelum prompt CLI siap (kemungkinan batas max session VTY penuh).',
+          'MAX_SESSION'
+        );
+      } else {
+        finalizeSocketAndResolve(false, fullOutput, 'Connection closed by OLT');
+      }
+    });
+
     socket.on('timeout', () => {
       if (fullOutput.length > 0 && stage === 'EXEC_CMDS') {
-        finish(true, fullOutput);
+        gracefulLogoutAndFinish(true, fullOutput);
       } else {
-        finish(
-          false,
+        gracefulLogoutAndFinish(
+          tcpConnected,
           fullOutput,
           `Connection timed out to ${params.host}:${params.port} (${timeout}ms)`
         );
@@ -2135,9 +2341,129 @@ async function executeTelnetSession(params: {
     });
 
     socket.on('error', (err) => {
-      finish(false, fullOutput, err.message);
+      finalizeSocketAndResolve(false, fullOutput, err.message);
     });
   });
+}
+
+async function executeTelnetSession(params: {
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+  enablePassword?: string;
+  commands: string[];
+  timeoutMs?: number;
+  isBackground?: boolean;
+}): Promise<{
+  ok: boolean;
+  reachable: boolean;
+  output: string;
+  commandsExecuted: string[];
+  durationMs: number;
+  error?: string;
+  skipped?: boolean;
+}> {
+  const endpointKey = getOltEndpointKey(params.host, params.port);
+  const credKey = getOltCredKey(params.host, params.port, params.username);
+  const now = Date.now();
+
+  // 1. Circuit breaker: saat OLT sedang cooldown (max-session / user locked / auth fail),
+  //    skip polling background agar tidak memperpanjang blokir akun OLT!
+  const cooldown = oltAuthCooldownMap.get(credKey);
+  if (cooldown) {
+    if (cooldown.until > now) {
+      if (params.isBackground) {
+        const remainingSec = Math.ceil((cooldown.until - now) / 1000);
+        return {
+          ok: false,
+          reachable: true,
+          skipped: true,
+          output: '',
+          commandsExecuted: [],
+          durationMs: 0,
+          error: `${cooldown.reason} (jeda ${remainingSec} detik)`,
+        };
+      }
+    } else {
+      oltAuthCooldownMap.delete(credKey);
+    }
+  }
+
+  // 2. Jika ini background poll dan sudah ada sesi Telnet aktif/antre di OLT yang sama,
+  //    skip langsung agar tidak menumpuk antrean atau membuka sesi ganda!
+  const activeCount = oltTelnetActiveCount.get(endpointKey) || 0;
+  if (params.isBackground && activeCount > 0) {
+    return {
+      ok: false,
+      reachable: true,
+      skipped: true,
+      output: '',
+      commandsExecuted: [],
+      durationMs: 0,
+      error: 'Sesi Telnet lain sedang berjalan pada OLT ini — background poll dilewati.',
+    };
+  }
+
+  // 3. Per-OLT strict mutex queue: hanya 1 koneksi Telnet per OLT pada satu waktu
+  oltTelnetActiveCount.set(endpointKey, activeCount + 1);
+  const prevChain = oltTelnetChains.get(endpointKey) || Promise.resolve();
+
+  let releaseNext!: () => void;
+  const currentChain = new Promise<void>((resolve) => {
+    releaseNext = resolve;
+  });
+  oltTelnetChains.set(
+    endpointKey,
+    prevChain.then(() => currentChain)
+  );
+
+  try {
+    await prevChain;
+
+    // Pastikan jeda minimal 350ms setelah sesi sebelumnya ditutup agar ZTE telnetd melepas slot VTY
+    const lastClosed = oltLastSessionClosedAt.get(endpointKey) || 0;
+    const elapsed = Date.now() - lastClosed;
+    if (elapsed < TELNET_SESSION_GAP_MS) {
+      await new Promise((r) => setTimeout(r, TELNET_SESSION_GAP_MS - elapsed));
+    }
+
+    const res = await runRawTelnetSession(params);
+
+    if (res.ok) {
+      oltLastReachableAt.set(endpointKey, Date.now());
+      oltTcpProbeCache.set(endpointKey, { ok: true, checkedAt: Date.now() });
+      oltAuthCooldownMap.delete(credKey);
+    } else if (res.errorKind) {
+      const durationMs =
+        res.errorKind === 'LOCKED'
+          ? COOLDOWN_USER_LOCKED_MS
+          : res.errorKind === 'MAX_SESSION'
+            ? COOLDOWN_MAX_SESSION_MS
+            : COOLDOWN_AUTH_FAIL_MS;
+      oltAuthCooldownMap.set(credKey, {
+        until: Date.now() + durationMs,
+        reason: res.error || 'OLT menolak sesi Telnet.',
+        kind: res.errorKind,
+      });
+      console.warn(
+        `[ZTE Telnet Guard] ${endpointKey} (${params.username || 'zte'}) -> ${res.errorKind}, jeda polling ${Math.round(durationMs / 1000)}s`
+      );
+    } else if (!res.reachable) {
+      oltTcpProbeCache.set(endpointKey, { ok: false, checkedAt: Date.now() });
+    }
+
+    return res;
+  } finally {
+    oltLastSessionClosedAt.set(endpointKey, Date.now());
+    const remaining = Math.max(0, (oltTelnetActiveCount.get(endpointKey) || 1) - 1);
+    if (remaining === 0) {
+      oltTelnetActiveCount.delete(endpointKey);
+    } else {
+      oltTelnetActiveCount.set(endpointKey, remaining);
+    }
+    releaseNext();
+  }
 }
 
 /**
@@ -6531,6 +6857,7 @@ app.post(
 });
 
 // Fast TCP reachability probe for real-time OLT Online/Offline status check
+// Dilengkapi cache 12 detik & bypass saat Telnet aktif/baru sukses agar tidak memboroskan slot VTY port 23 ZTE!
 function probeOltTcpReachable(
   host: string,
   port: number,
@@ -6547,13 +6874,39 @@ function probeOltTcpReachable(
       resolve(false);
       return;
     }
+
+    const endpointKey = getOltEndpointKey(cleanHost, cleanPort);
+    const now = Date.now();
+    // Jika ada sesi Telnet sedang berjalan atau baru saja sukses <20 detik lalu, OLT pasti ONLINE tanpa buka socket baru
+    if (
+      (oltTelnetActiveCount.get(endpointKey) || 0) > 0 ||
+      now - (oltLastReachableAt.get(endpointKey) || 0) < 20_000
+    ) {
+      resolve(true);
+      return;
+    }
+    const cached = oltTcpProbeCache.get(endpointKey);
+    if (cached && now - cached.checkedAt < 12_000) {
+      resolve(cached.ok);
+      return;
+    }
+
     const socket = new net.Socket();
     let settled = false;
     const finish = (ok: boolean) => {
       if (settled) return;
       settled = true;
+      oltTcpProbeCache.set(endpointKey, { ok, checkedAt: Date.now() });
       try {
-        socket.destroy();
+        // Kirim FIN secara halus sebelum destroy agar VTY pre-auth ZTE segera dilepas
+        socket.end();
+        setTimeout(() => {
+          try {
+            if (!socket.destroyed) socket.destroy();
+          } catch {
+            // ignore
+          }
+        }, 60);
       } catch {
         // ignore
       }
@@ -6793,32 +7146,9 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       }
     }
 
-    // Quick 2.5s TCP reachability check before running full 16s Telnet command batch
-    const tcpAlive = await probeOltTcpReachable(
-      olt.ip_address,
-      olt.telnet_port,
-      2500
-    );
-    if (!tcpAlive) {
-      const latestState = await loadDatabaseState();
-      const cascaded = cascadeOfflineOltsToOnusAndPorts({
-        ...latestState,
-        olts: latestState.olts.map((o) =>
-          o.id === olt.id ? { ...o, status: 'OFFLINE' as const } : o
-        ),
-      });
-      if (olt.status !== 'OFFLINE' || cascaded.mutated) {
-        await saveDatabaseState(cascaded.state);
-      }
-      res.json({
-        ok: false,
-        reachable: false,
-        oltStatus: 'OFFLINE',
-        state: sanitizeStateForClient(cascaded.state, authUser?.role),
-      });
-      return;
-    }
+    const isBgPoll = req.headers['x-background-poll'] === '1';
 
+    // Langsung konek lewat executeTelnetSession (tanpa pre-probe TCP port 23 ganda yang memakan slot VTY ZTE)
     const telnetRes = await executeTelnetSession({
       host: olt.ip_address,
       port: olt.telnet_port,
@@ -6827,7 +7157,19 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       enablePassword: olt.enable_password,
       commands: cmds,
       timeoutMs: 16000,
+      isBackground: isBgPoll,
     });
+
+    if (telnetRes.skipped) {
+      res.json({
+        ok: true,
+        skipped: true,
+        reachable: true,
+        error: telnetRes.error,
+        state: sanitizeStateForClient(state, authUser?.role),
+      });
+      return;
+    }
 
     if (!telnetRes.reachable || !telnetRes.output.trim()) {
       const latestState = await loadDatabaseState();
@@ -6847,6 +7189,7 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         ok: false,
         reachable: telnetRes.reachable,
         oltStatus: nextStatus,
+        error: telnetRes.error,
         state: sanitizeStateForClient(cascaded.state, authUser?.role),
       });
       return;
@@ -8177,6 +8520,7 @@ app.post('/api/onus/:id/poll-telemetry', async (req, res) => {
       enablePassword: olt.enable_password,
       commands: cliCommands,
       timeoutMs: 14000,
+      isBackground: req.headers['x-background-poll'] === '1',
     });
 
     const nowMs = Date.now();
@@ -8992,6 +9336,7 @@ app.post('/api/olts/:id/poll-graphs', async (req, res) => {
       enablePassword: olt.enable_password,
       commands: cmds,
       timeoutMs: 16000,
+      isBackground: req.headers['x-background-poll'] === '1',
     });
 
     const nowMs = Date.now();
