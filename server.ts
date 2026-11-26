@@ -25,6 +25,8 @@ import {
 } from './src/services/mockDatabase.js';
 import {
   cleanZteCliText,
+  isEponBoard,
+  isEponInterface,
   parseZteRunningConfig,
   parseZteUncfgOutput,
   parseZteOnuStateOutput,
@@ -40,6 +42,61 @@ import {
   parseZteMultiInterfaceTraffic,
   findNextAvailableOnuIndex,
 } from './src/services/oltEngine.js';
+
+function isOltSlotEpon(
+  state: Pick<SmartOltDatabaseState, 'olt_cards' | 'pon_ports' | 'olts'>,
+  oltId: number,
+  slotNum: number
+): boolean {
+  const card = (state.olt_cards || []).find((c) => c.olt_id === oltId && c.slot === slotNum);
+  if (card) {
+    return isEponBoard(card.real_type || card.type);
+  }
+  const port = (state.pon_ports || []).find(
+    (p) => p.olt_id === oltId && (p.slot === slotNum || Number(p.interface_name.split('/')[1]) === slotNum)
+  );
+  if (port) {
+    return isEponInterface(port.interface_name) || isEponBoard(port.board_model);
+  }
+  const olt = (state.olts || []).find((o) => o.id === oltId);
+  const ponTypes = String(olt?.supported_pon_types || '').toUpperCase();
+  if (ponTypes.includes('EPON') && !ponTypes.includes('GPON')) return true;
+  return false;
+}
+
+function hasOltEponBoard(
+  state: Pick<SmartOltDatabaseState, 'olt_cards' | 'pon_ports' | 'olts'>,
+  oltId: number
+): boolean {
+  const olt = (state.olts || []).find((o) => o.id === oltId);
+  if (String(olt?.supported_pon_types || '').toUpperCase().includes('EPON')) return true;
+  if ((state.olt_cards || []).some((c) => c.olt_id === oltId && isEponBoard(c.real_type || c.type))) {
+    return true;
+  }
+  if (
+    (state.pon_ports || []).some(
+      (p) => p.olt_id === oltId && (isEponInterface(p.interface_name) || isEponBoard(p.board_model))
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function buildPonOltIf(
+  state: Pick<SmartOltDatabaseState, 'olt_cards' | 'pon_ports' | 'olts'>,
+  oltId: number,
+  board: number,
+  port: number
+): { isEpon: boolean; oltIf: string; onuIf: (idx: number) => string } {
+  const isEpon = isOltSlotEpon(state, oltId, board);
+  const oltIf = `${isEpon ? 'epon-olt_' : 'gpon-olt_'}1/${board}/${port}`;
+  return {
+    isEpon,
+    oltIf,
+    onuIf: (idx: number) => `${isEpon ? 'epon-onu_' : 'gpon-onu_'}1/${board}/${port}:${idx}`,
+  };
+}
 
 process.env.TZ = 'Asia/Jakarta';
 dotenv.config();
@@ -2498,15 +2555,50 @@ async function fetchMissingOnuConfigsFromOlt(params: {
   let parsedStates = parseZteOnuStateOutput(combinedOutputSoFar);
   let baseinfoMap = parseZteOnuBaseinfoOutput(combinedOutputSoFar);
 
-  // Step A: If global `show gpon onu state` returned 0 states AND `parsedCfg.onus` has <= 1 ONU,
-  // query `show gpon onu baseinfo` and per-port `show gpon onu state gpon-olt_1/3/<p>` + `show running-config interface gpon-olt_1/3/<p>`
+  // Step A: If global state returned 0..1 ONUs AND `parsedCfg.onus` has <= 1 ONU,
+  // query per-port state & running-config for detected GPON/EPON slots from `show card`
+  const detectedCards = parseZteCardOutput(combinedOutputSoFar);
+  const eponSlots = new Set<number>(
+    detectedCards
+      .filter((c) => isEponBoard(c.realType || c.type))
+      .map((c) => c.slot)
+  );
+  for (const pp of parsedCfg.ponPorts || []) {
+    if (isEponInterface(pp.interfaceName)) eponSlots.add(pp.slot);
+  }
+
   if (parsedStates.length <= 1 && parsedCfg.onus.length <= 1) {
-    const portDiscoveryCmds: string[] = ['show gpon onu baseinfo', 'show gpon onu state'];
-    for (let p = 1; p <= 16; p++) {
-      portDiscoveryCmds.push(
-        `show gpon onu state gpon-olt_1/3/${p}`,
-        `show running-config interface gpon-olt_1/3/${p}`
-      );
+    const portDiscoveryCmds: string[] = [
+      'show gpon onu baseinfo',
+      'show gpon onu state',
+      ...(eponSlots.size > 0 ? ['show onu all-status', 'show onu unauthentication'] : []),
+    ];
+    const ponCards = detectedCards.filter((c) =>
+      /^(GTG|GTH|GFG|ETG|GPON|EPON|XPON)/i.test(c.realType || c.type)
+    );
+    const targetSlots =
+      ponCards.length > 0
+        ? ponCards.map((c) => ({
+            slot: c.slot,
+            ports: c.ports || ((c.realType || c.type).startsWith('GTGO') || (c.realType || c.type).startsWith('ETGO') ? 8 : 16),
+            isEpon: isEponBoard(c.realType || c.type),
+          }))
+        : [{ slot: 3, ports: 16, isEpon: false }];
+    for (const s of targetSlots.slice(0, 2)) {
+      const prefix = s.isEpon ? 'epon-olt_' : 'gpon-olt_';
+      for (let p = 1; p <= s.ports; p++) {
+        if (s.isEpon) {
+          portDiscoveryCmds.push(
+            `show onu all-status ${prefix}1/${s.slot}/${p}`,
+            `show running-config interface ${prefix}1/${s.slot}/${p}`
+          );
+        } else {
+          portDiscoveryCmds.push(
+            `show gpon onu state ${prefix}1/${s.slot}/${p}`,
+            `show running-config interface ${prefix}1/${s.slot}/${p}`
+          );
+        }
+      }
     }
     const discRes = await executeTelnetSession({
       host,
@@ -2528,7 +2620,7 @@ async function fetchMissingOnuConfigsFromOlt(params: {
 
   // Step B: Identify all active PON ports and all ONU coordinates (`1/B/P:I`) known across state, baseinfo, and config
   const allPorts = new Set<string>();
-  const allOnuCoords = new Map<string, { board: number; port: number; onuIndex: number }>();
+  const allOnuCoords = new Map<string, { board: number; port: number; onuIndex: number; isEpon: boolean }>();
 
   for (const st of parsedStates) {
     const m = st.fullInterface.match(/(\d+)\/(\d+)\/(\d+):(\d+)/);
@@ -2536,23 +2628,28 @@ async function fetchMissingOnuConfigsFromOlt(params: {
     const b = parseInt(m[2], 10);
     const p = parseInt(m[3], 10);
     const idx = parseInt(m[4], 10);
+    const isEp = isEponInterface(st.fullInterface) || eponSlots.has(b);
+    if (isEp) eponSlots.add(b);
     allPorts.add(`1/${b}/${p}`);
-    allOnuCoords.set(`1/${b}/${p}:${idx}`, { board: b, port: p, onuIndex: idx });
+    allOnuCoords.set(`1/${b}/${p}:${idx}`, { board: b, port: p, onuIndex: idx, isEpon: isEp });
   }
   for (const [key, bi] of baseinfoMap.entries()) {
+    const isEp = bi.ponType === 'EPON' || eponSlots.has(bi.board);
     allPorts.add(`1/${bi.board}/${bi.port}`);
-    allOnuCoords.set(key, { board: bi.board, port: bi.port, onuIndex: bi.onuIndex });
+    allOnuCoords.set(key, { board: bi.board, port: bi.port, onuIndex: bi.onuIndex, isEpon: isEp });
   }
   for (const o of parsedCfg.onus) {
+    const isEp = eponSlots.has(o.board);
     allPorts.add(`1/${o.board}/${o.port}`);
     allOnuCoords.set(`1/${o.board}/${o.port}:${o.onuIndex}`, {
       board: o.board,
       port: o.port,
       onuIndex: o.onuIndex,
+      isEpon: isEp,
     });
   }
 
-  // Check which ports or ONUs still need their `interface gpon-olt_1/B/P` or `interface gpon-onu_1/B/P:I` config
+  // Check which ports or ONUs still need their `interface (gpon|epon)-olt_1/B/P` or `interface (gpon|epon)-onu_1/B/P:I` config
   const cfgByKey = new Map(
     parsedCfg.onus.map((o) => [`1/${o.board}/${o.port}:${o.onuIndex}`, o])
   );
@@ -2563,7 +2660,7 @@ async function fetchMissingOnuConfigsFromOlt(params: {
   );
 
   const portsNeedingOltConfig = new Set<string>();
-  const onusNeedingDetailConfig: Array<{ board: number; port: number; onuIndex: number }> = [];
+  const onusNeedingDetailConfig: Array<{ board: number; port: number; onuIndex: number; isEpon: boolean }> = [];
 
   for (const [key, coord] of allOnuCoords.entries()) {
     const cfgOnu = cfgByKey.get(key);
@@ -2589,30 +2686,41 @@ async function fetchMissingOnuConfigsFromOlt(params: {
 
   const targetedCmds: string[] = [];
   for (const portCoord of allPorts) {
+    const slotNum = Number(portCoord.split('/')[1]);
+    const isEpPort = eponSlots.has(slotNum);
+    const oltPrefix = isEpPort ? 'epon-olt_' : 'gpon-olt_';
     if (
       portsNeedingOltConfig.has(portCoord) ||
-      !new RegExp(`interface\\s+gpon-olt_${portCoord}\\b`, 'i').test(
+      !new RegExp(`interface\\s+${oltPrefix}${portCoord}\\b`, 'i').test(
         `${combinedOutputSoFar}\n${extraOutput}`
       )
     ) {
-      targetedCmds.push(
-        `show running-config interface gpon-olt_${portCoord}`,
-        `show gpon onu baseinfo gpon-olt_${portCoord}`
-      );
+      targetedCmds.push(`show running-config interface ${oltPrefix}${portCoord}`);
+      if (!isEpPort) {
+        targetedCmds.push(`show gpon onu baseinfo ${oltPrefix}${portCoord}`);
+      }
     }
-    targetedCmds.push(`show pon power onu-rx gpon-olt_${portCoord}`);
+    targetedCmds.push(`show pon power onu-rx ${oltPrefix}${portCoord}`);
   }
 
   // Query individual ONU running-config & detail-info for up to 35 ONUs per batch
   for (const coord of onusNeedingDetailConfig.slice(0, 35)) {
-    const onuIf = `gpon-onu_1/${coord.board}/${coord.port}:${coord.onuIndex}`;
-    targetedCmds.push(
-      `show running-config interface ${onuIf}`,
-      `show onu running config ${onuIf}`,
-      `show gpon onu detail-info ${onuIf}`,
-      `show gpon remote-onu pppoe ${onuIf}`,
-      `show gpon remote-onu wan-ip ${onuIf}`
-    );
+    const onuIf = `${coord.isEpon ? 'epon-onu_' : 'gpon-onu_'}1/${coord.board}/${coord.port}:${coord.onuIndex}`;
+    if (coord.isEpon) {
+      targetedCmds.push(
+        `show running-config interface ${onuIf}`,
+        `show onu running config ${onuIf}`,
+        `show onu detail-info ${onuIf}`
+      );
+    } else {
+      targetedCmds.push(
+        `show running-config interface ${onuIf}`,
+        `show onu running config ${onuIf}`,
+        `show gpon onu detail-info ${onuIf}`,
+        `show gpon remote-onu pppoe ${onuIf}`,
+        `show gpon remote-onu wan-ip ${onuIf}`
+      );
+    }
   }
 
   if (targetedCmds.length > 0) {
@@ -2681,10 +2789,11 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
   const stateByIf = new Map<string, (typeof parsedStates)[number]>();
   for (const st of parsedStates) {
     stateByIf.set(st.fullInterface.toLowerCase(), st);
+    const cm = st.fullInterface.match(/(\d+\/\d+\/\d+:\d+)/);
+    if (cm) stateByIf.set(cm[1], st);
   }
 
-  // Ensure any ONU index reported by `show gpon onu state` is also in `parsed.onus`
-  // so no occupied ONU index on the OLT can ever be overlooked!
+  // Ensure any ONU index reported by `show gpon onu state` / `show onu all-status` is also in `parsed.onus`
   const parsedOnuKeys = new Set(
     parsed.onus.map((o) => `1/${o.board}/${o.port}:${o.onuIndex}`)
   );
@@ -2695,9 +2804,9 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
     const port = parseInt(m[3], 10);
     const onuIndex = parseInt(m[4], 10);
     const key = `1/${board}/${port}:${onuIndex}`;
-    const fullIfKey = `gpon-onu_1/${board}/${port}:${onuIndex}`.toLowerCase();
+    const fullIfKey = st.fullInterface.toLowerCase();
     const bi = baseinfoMap.get(key);
-    const det = multiDetailsMap.get(fullIfKey);
+    const det = multiDetailsMap.get(fullIfKey) || multiDetailsMap.get(`gpon-onu_${key}`) || multiDetailsMap.get(`epon-onu_${key}`);
 
     if (!parsedOnuKeys.has(key)) {
       parsedOnuKeys.add(key);
@@ -2881,10 +2990,11 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
   const otherOnus = state.onus.filter((o) => o.olt_id !== oltId);
   const parsedConfiguredOnus: OnuRecord[] = parsed.onus.map((o) => {
     const matchedVlan = newVlans.find((v) => v.vlan_id === o.vlanId);
-    const fullIfKey = `gpon-onu_1/${o.board}/${o.port}:${o.onuIndex}`.toLowerCase();
     const coordKey = `1/${o.board}/${o.port}:${o.onuIndex}`;
+    const gponKey = `gpon-onu_${coordKey}`.toLowerCase();
+    const eponKey = `epon-onu_${coordKey}`.toLowerCase();
     const bi = baseinfoMap.get(coordKey);
-    const det = multiDetailsMap.get(fullIfKey);
+    const det = multiDetailsMap.get(eponKey) || multiDetailsMap.get(gponKey);
 
     const prevOnu = state.onus.find(
       (u) =>
@@ -2893,7 +3003,7 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
           (!o.serialNumber.startsWith('ONU-') &&
             u.serial_number.toUpperCase() === o.serialNumber.toUpperCase()))
     );
-    const liveState = stateByIf.get(fullIfKey);
+    const liveState = stateByIf.get(eponKey) || stateByIf.get(gponKey) || stateByIf.get(coordKey);
     const phaseState = liveState
       ? liveState.phaseState
       : det?.phaseState
@@ -2902,9 +3012,11 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
       ? prevOnu?.phase_state || 'OffLine'
       : prevOnu?.phase_state || 'working';
 
-    const wanInfo = wanIpMap.get(fullIfKey);
-    const liveRxDbm = powerRxMap.has(fullIfKey)
-      ? powerRxMap.get(fullIfKey) ?? null
+    const wanInfo = wanIpMap.get(eponKey) || wanIpMap.get(gponKey);
+    const liveRxDbm = powerRxMap.has(eponKey)
+      ? powerRxMap.get(eponKey) ?? null
+      : powerRxMap.has(gponKey)
+      ? powerRxMap.get(gponKey) ?? null
       : phaseState === 'working'
       ? prevOnu?.onu_rx_dbm ?? -21.85
       : null;
@@ -3135,31 +3247,42 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
     configuredBySlotPort.set(spKey, rec);
   }
 
-  const slotMetaMap = new Map<number, { boardModel: string; portCount: number }>();
+  const slotMetaMap = new Map<number, { boardModel: string; portCount: number; isEpon: boolean }>();
   for (const c of newCards) {
     const ct = (c.real_type || c.type || '').toUpperCase();
     const isPonCard =
-      /^(GTG|GTH|GFG|ETG|GPON|EPON|XPON)/i.test(ct) ||
+      /^(GTG|GTH|GFG|ETG|ETX|GPON|EPON|XPON)/i.test(ct) ||
       ((c.ports || 0) >= 8 && c.slot <= 17 && !/^(SCX|SMX|PRW|HUV|HUQ|GUF|XUT|GUT)/i.test(ct));
     if (isPonCard) {
       const count =
         c.ports && c.ports > 0
           ? c.ports
-          : ct.startsWith('GTGO')
+          : ct.startsWith('GTGO') || ct.startsWith('ETGO')
             ? 8
             : 16;
-      slotMetaMap.set(c.slot, { boardModel: ct || 'GTGH', portCount: count });
+      slotMetaMap.set(c.slot, {
+        boardModel: ct || 'GTGH',
+        portCount: count,
+        isEpon: isEponBoard(ct),
+      });
     }
   }
   for (const pp of parsed.ponPorts || []) {
+    const isEp = isEponInterface(pp.interfaceName);
     const existing = slotMetaMap.get(pp.slot);
     if (!existing) {
       slotMetaMap.set(pp.slot, {
-        boardModel: 'GTGH',
+        boardModel: isEp ? (pp.port > 8 ? 'ETGH' : 'ETGO') : 'GTGH',
         portCount: Math.max(pp.port, pp.port > 8 ? 16 : 8),
+        isEpon: isEp,
       });
-    } else if (pp.port > existing.portCount) {
-      existing.portCount = pp.port > 8 ? 16 : pp.port;
+    } else {
+      if (pp.port > existing.portCount) {
+        existing.portCount = pp.port > 8 ? 16 : pp.port;
+      }
+      if (isEp) {
+        existing.isEpon = true;
+      }
     }
   }
   for (const o of configuredOnus) {
@@ -3167,14 +3290,23 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
     if (!existing) {
       slotMetaMap.set(o.board, {
         boardModel: 'GTGH',
-        portCount: o.port > 8 ? 16 : 16,
+        portCount: 16,
+        isEpon: false,
       });
     } else if (o.port > existing.portCount) {
       existing.portCount = 16;
     }
   }
   if (slotMetaMap.size === 0) {
-    slotMetaMap.set(3, { boardModel: 'GTGH', portCount: 16 });
+    const oltRec = state.olts.find((o) => o.id === oltId);
+    const epOnly =
+      String(oltRec?.supported_pon_types || '').toUpperCase().includes('EPON') &&
+      !String(oltRec?.supported_pon_types || '').toUpperCase().includes('GPON');
+    slotMetaMap.set(3, {
+      boardModel: epOnly ? 'ETGH' : 'GTGH',
+      portCount: 16,
+      isEpon: epOnly,
+    });
   }
 
   const newPonPorts: PonPortRecord[] = [];
@@ -3182,7 +3314,7 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
   for (const slotNum of sortedSlots) {
     const meta = slotMetaMap.get(slotNum)!;
     for (let portNum = 1; portNum <= meta.portCount; portNum++) {
-      const ifName = `gpon-olt_1/${slotNum}/${portNum}`;
+      const ifName = `${meta.isEpon ? 'epon-olt_' : 'gpon-olt_'}1/${slotNum}/${portNum}`;
       const parsedPort = parsedPonByIf.get(ifName.toLowerCase());
       const prevPort = prevPonByIf.get(ifName.toLowerCase());
       const stats = configuredBySlotPort.get(`${slotNum}:${portNum}`) || {
@@ -6225,6 +6357,7 @@ async function inspectLivePonPortIndices(params: {
   portNum: number;
   serialNumber?: string;
   dbUsedIndices?: number[];
+  isEpon?: boolean;
 }): Promise<{
   reachable: boolean;
   usedIndices: number[];
@@ -6232,17 +6365,18 @@ async function inspectLivePonPortIndices(params: {
   nextFreeIndex: number;
   snByIndex: Map<number, string>;
 }> {
-  const ponIf = `gpon-olt_1/${params.boardNum}/${params.portNum}`;
+  const isEpon = Boolean(params.isEpon);
+  const ponIf = `${isEpon ? 'epon-olt_' : 'gpon-olt_'}1/${params.boardNum}/${params.portNum}`;
+  const maxCap = isEpon ? 64 : 128;
   const telnetRes = await executeTelnetSession({
     host: params.host,
     port: params.port,
     username: params.username,
     password: params.password,
     enablePassword: params.enablePassword,
-    commands: [
-      `show gpon onu state ${ponIf}`,
-      `show running-config interface ${ponIf}`,
-    ],
+    commands: isEpon
+      ? [`show onu all-status ${ponIf}`, `show running-config interface ${ponIf}`]
+      : [`show gpon onu state ${ponIf}`, `show running-config interface ${ponIf}`],
     timeoutMs: 12000,
   });
 
@@ -6252,13 +6386,13 @@ async function inspectLivePonPortIndices(params: {
   const targetSn = (params.serialNumber || '').trim().toUpperCase();
 
   if (telnetRes.reachable && telnetRes.output) {
-    // 1. Parse `onu <idx> type <type> sn <SN>` from `show running-config interface gpon-olt_1/B/P`
-    const onuLineRegex = /onu\s+(\d+)\s+type\s+\S+\s+sn\s+([A-Za-z0-9]+)/gi;
+    // 1. Parse `onu <idx> type <type> (sn|mac) <SN/MAC>` from `show running-config interface (gpon|epon)-olt_1/B/P`
+    const onuLineRegex = /onu\s+(\d+)\s+type\s+\S+\s+(?:sn|mac)\s+([A-Za-z0-9.\-:]+)/gi;
     let m: RegExpExecArray | null;
     while ((m = onuLineRegex.exec(telnetRes.output)) !== null) {
       const idx = parseInt(m[1], 10);
       const sn = m[2].trim().toUpperCase();
-      if (idx > 0 && idx <= 128) {
+      if (idx > 0 && idx <= maxCap) {
         usedSet.add(idx);
         snByIndex.set(idx, sn);
         if (targetSn && sn === targetSn) {
@@ -6267,10 +6401,10 @@ async function inspectLivePonPortIndices(params: {
       }
     }
 
-    // 2. Parse `1/B/P:<idx>` from `show gpon onu state gpon-olt_1/B/P`
+    // 2. Parse `1/B/P:<idx>` from `show gpon onu state` or `show onu all-status`
     const parsedStates = parseZteOnuStateOutput(telnetRes.output);
     for (const st of parsedStates) {
-      if (st.onuIndex > 0 && st.onuIndex <= 128) {
+      if (st.onuIndex > 0 && st.onuIndex <= maxCap) {
         usedSet.add(st.onuIndex);
       }
     }
@@ -6280,7 +6414,7 @@ async function inspectLivePonPortIndices(params: {
   const nextFreeIndex =
     existingSnIndex !== null
       ? existingSnIndex
-      : findNextAvailableOnuIndex(usedIndices, 128);
+      : findNextAvailableOnuIndex(usedIndices, maxCap);
 
   return {
     reachable: telnetRes.reachable,
@@ -6336,6 +6470,7 @@ app.post(
       portNum: Number(port),
       serialNumber: String(serialNumber),
       dbUsedIndices,
+      isEpon: isOltSlotEpon(state, olt.id, Number(board)),
     });
 
       res.json({
@@ -6457,18 +6592,20 @@ app.post('/api/telnet/exec', async (req, res) => {
   // without an explicit `no onu <idx>` (i.e. fresh Authorize), check the live OLT PON port first
   // so it NEVER collides with or overwrites an existing ONU at `<idx>`!
   const isNewAuthScript =
-    /interface\s+gpon-olt_1\/(\d+)\/(\d+)/i.test(rawScript) &&
-    /^\s*onu\s+(\d+)\s+type\s+(\S+)\s+sn\s+([A-Za-z0-9]+)/im.test(rawScript) &&
+    /interface\s+(gpon|epon)-olt_1\/(\d+)\/(\d+)/i.test(rawScript) &&
+    /^\s*onu\s+(\d+)\s+type\s+(\S+)\s+(?:sn|mac)\s+([A-Za-z0-9.\-:]+)/im.test(rawScript) &&
     !/^\s*no\s+onu\s+\d+/im.test(rawScript);
 
   if (isNewAuthScript) {
-    const oltIfMatch = rawScript.match(/interface\s+gpon-olt_1\/(\d+)\/(\d+)/i);
+    const oltIfMatch = rawScript.match(/interface\s+(gpon|epon)-olt_1\/(\d+)\/(\d+)/i);
     const onuRegMatch = rawScript.match(
-      /^\s*onu\s+(\d+)\s+type\s+(\S+)\s+sn\s+([A-Za-z0-9]+)/im
+      /^\s*onu\s+(\d+)\s+type\s+(\S+)\s+(?:sn|mac)\s+([A-Za-z0-9.\-:]+)/im
     );
     if (oltIfMatch && onuRegMatch) {
-      const boardNum = parseInt(oltIfMatch[1], 10);
-      const portNum = parseInt(oltIfMatch[2], 10);
+      const proto = oltIfMatch[1].toLowerCase();
+      const isEpScript = proto === 'epon';
+      const boardNum = parseInt(oltIfMatch[2], 10);
+      const portNum = parseInt(oltIfMatch[3], 10);
       const requestedIdx = parseInt(onuRegMatch[1], 10);
       const targetSn = onuRegMatch[3].trim().toUpperCase();
 
@@ -6494,6 +6631,7 @@ app.post('/api/telnet/exec', async (req, res) => {
         portNum,
         serialNumber: targetSn,
         dbUsedIndices,
+        isEpon: isEpScript,
       });
 
       const occupantSn = liveCheck.snByIndex.get(requestedIdx);
@@ -6511,7 +6649,7 @@ app.post('/api/telnet/exec', async (req, res) => {
 
       if (safeIdx !== requestedIdx) {
         console.log(
-          `[OLT Collision Guard] gpon-olt_1/${boardNum}/${portNum} index #${requestedIdx} is occupied on OLT (${occupantSn || 'active'}). Automatically shifting ${targetSn} to free index #${safeIdx}!`
+          `[OLT Collision Guard] ${proto}-olt_1/${boardNum}/${portNum} index #${requestedIdx} is occupied on OLT (${occupantSn || 'active'}). Automatically shifting ${targetSn} to free index #${safeIdx}!`
         );
         reallocatedOnuIndex = safeIdx;
         rawScript = rawScript
@@ -6521,14 +6659,12 @@ app.post('/api/telnet/exec', async (req, res) => {
           )
           .replace(
             new RegExp(
-              `(gpon-onu_1\\/${boardNum}\\/${portNum}:)${requestedIdx}\\b`,
+              `(${proto}-onu_1\\/${boardNum}\\/${portNum}:)${requestedIdx}\\b`,
               'gi'
             ),
             `$1${safeIdx}`
           );
       } else if (liveCheck.existingSnIndex === safeIdx) {
-        // If this exact SN is already registered on safeIdx on the OLT, prepend `no onu <safeIdx>`
-        // so `onu <safeIdx> type ALL sn <SN>` cleanly re-registers without %Error!
         rawScript = rawScript.replace(
           new RegExp(`(^\\s*onu\\s+${safeIdx}\\s+type\\s+)`, 'im'),
           `  no onu ${safeIdx}\n$1`
@@ -6790,19 +6926,24 @@ app.post(
         `[OLT Live Sync] Fetching full configuration & telemetry from ${targetHost}:${targetPort} (user: ${targetUser})...`
       );
 
+      const syncCommands = [
+        'show card',
+        'show gpon onu uncfg',
+        'show gpon onu state',
+        'show gpon onu baseinfo',
+        ...(hasOltEponBoard(state, olt?.id || oltId)
+          ? ['show onu unauthentication', 'show onu all-status']
+          : []),
+        'show running-config',
+      ];
+
       const telnetRes = await executeTelnetSession({
         host: targetHost,
         port: targetPort,
         username: targetUser,
         password: targetPass,
         enablePassword: targetEnablePass,
-        commands: [
-          'show card',
-          'show gpon onu uncfg',
-          'show gpon onu state',
-          'show gpon onu baseinfo',
-          'show running-config',
-        ],
+        commands: syncCommands,
         timeoutMs: 60000,
       });
 
@@ -6847,19 +6988,28 @@ app.post(
     // Discover active PON ports & working ONUs to immediately pull real optical power & MikroTik WAN IPs
     const prelimParsed = parseZteRunningConfig(combinedSyncOutput);
     const prelimStates = parseZteOnuStateOutput(combinedSyncOutput);
-    const activePortSet = new Set<string>();
+    const prelimCards = parseZteCardOutput(combinedSyncOutput);
+    const eponSlotSet = new Set<number>(
+      prelimCards.filter((c) => isEponBoard(c.realType || c.type)).map((c) => c.slot)
+    );
+    for (const pp of prelimParsed.ponPorts || []) {
+      if (isEponInterface(pp.interfaceName)) eponSlotSet.add(pp.slot);
+    }
+
+    const activePortMap = new Map<string, boolean>();
     for (const o of prelimParsed.onus) {
-      activePortSet.add(`1/${o.board}/${o.port}`);
+      activePortMap.set(`1/${o.board}/${o.port}`, eponSlotSet.has(o.board));
     }
     for (const st of prelimStates) {
       const m = st.ponInterface.match(/(\d+\/\d+\/\d+)/);
-      if (m) activePortSet.add(m[1]);
+      if (m) activePortMap.set(m[1], isEponInterface(st.ponInterface));
     }
 
     const telemetryCmds: string[] = [];
-    for (const coords of activePortSet) {
-      if (!combinedSyncOutput.includes(`show pon power onu-rx gpon-olt_${coords}`)) {
-        telemetryCmds.push(`show pon power onu-rx gpon-olt_${coords}`);
+    for (const [coords, isEp] of activePortMap.entries()) {
+      const oltIf = `${isEp ? 'epon-olt_' : 'gpon-olt_'}${coords}`;
+      if (!combinedSyncOutput.includes(`show pon power onu-rx ${oltIf}`)) {
+        telemetryCmds.push(`show pon power onu-rx ${oltIf}`);
       }
     }
     const workingIfs = prelimStates
@@ -6867,11 +7017,15 @@ app.post(
       .slice(0, 25)
       .map((st) => st.fullInterface);
     for (const onuIf of workingIfs) {
-      telemetryCmds.push(
-        `show gpon remote-onu ip-host ${onuIf}`,
-        `show gpon remote-onu pppoe ${onuIf}`,
-        `show gpon remote-onu wan-ip ${onuIf}`
-      );
+      if (isEponInterface(onuIf)) {
+        telemetryCmds.push(`show onu detail-info ${onuIf}`);
+      } else {
+        telemetryCmds.push(
+          `show gpon remote-onu ip-host ${onuIf}`,
+          `show gpon remote-onu pppoe ${onuIf}`,
+          `show gpon remote-onu wan-ip ${onuIf}`
+        );
+      }
     }
 
     let rawTelemetryOutput = enrichedMissingOutput;
@@ -7157,18 +7311,32 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       ? state.onus.find((u) => u.id === Number(onuId) && u.is_authorized)
       : undefined;
 
-    const cmds: string[] = ['show gpon onu state', 'show gpon onu uncfg'];
+    const oltHasEpon = hasOltEponBoard(state, olt.id);
+    const cmds: string[] = [
+      'show gpon onu state',
+      'show gpon onu uncfg',
+      ...(oltHasEpon ? ['show onu all-status', 'show onu unauthentication'] : []),
+    ];
 
     if (focusedOnu && focusedOnu.onu_index !== null) {
-      const onuIf = `gpon-onu_1/${focusedOnu.board}/${focusedOnu.port}:${focusedOnu.onu_index}`;
-      cmds.push(
-        `show interface ${onuIf}`,
-        `show gpon onu detail-info ${onuIf}`,
-        `show pon power attenuation ${onuIf}`,
-        `show gpon remote-onu ip-host ${onuIf}`,
-        `show gpon remote-onu pppoe ${onuIf}`,
-        `show gpon remote-onu wan-ip ${onuIf}`
-      );
+      const pon = buildPonOltIf(state, olt.id, focusedOnu.board, focusedOnu.port);
+      const onuIf = pon.onuIf(focusedOnu.onu_index);
+      if (pon.isEpon) {
+        cmds.push(
+          `show interface ${onuIf}`,
+          `show onu detail-info ${onuIf}`,
+          `show pon power attenuation ${onuIf}`
+        );
+      } else {
+        cmds.push(
+          `show interface ${onuIf}`,
+          `show gpon onu detail-info ${onuIf}`,
+          `show pon power attenuation ${onuIf}`,
+          `show gpon remote-onu ip-host ${onuIf}`,
+          `show gpon remote-onu pppoe ${onuIf}`,
+          `show gpon remote-onu wan-ip ${onuIf}`
+        );
+      }
     } else {
       // Always poll real OLT Uplink & active PON port traffic during real-time telemetry cycles (no VLAN interfaces)
       const oltUplinkIfs = (state.uplink_ports || [])
@@ -7194,30 +7362,40 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         (u) => u.olt_id === olt.id && u.is_authorized && u.onu_index !== null
       );
       const activePorts = Array.from(
-        new Set(oltOnus.map((u) => `1/${u.board}/${u.port}`))
+        new Set(
+          oltOnus.map((u) => buildPonOltIf(state, olt.id, u.board, u.port).oltIf)
+        )
       );
-      for (const pCoord of activePorts) {
-        cmds.push(`show interface gpon-olt_${pCoord}`);
+      for (const oltIf of activePorts) {
+        cmds.push(`show interface ${oltIf}`);
       }
       if (activePorts.length > 0) {
-        const portCoord =
+        const oltIf =
           activePorts[roundRobinTelemetryCursor % activePorts.length];
-        cmds.push(`show pon power onu-rx gpon-olt_${portCoord}`);
+        cmds.push(`show pon power onu-rx ${oltIf}`);
       }
       if (oltOnus.length > 0) {
         const batchSize = Math.min(3, oltOnus.length);
         for (let i = 0; i < batchSize; i++) {
           const target =
             oltOnus[(roundRobinTelemetryCursor + i) % oltOnus.length];
-          const onuIf = `gpon-onu_1/${target.board}/${target.port}:${target.onu_index}`;
-          cmds.push(
-            `show interface ${onuIf}`,
-            `show gpon remote-onu ip-host ${onuIf}`,
-            `show gpon remote-onu pppoe ${onuIf}`,
-            `show gpon remote-onu wan-ip ${onuIf}`
-          );
-          if (target.phase_state !== 'working') {
-            cmds.push(`show gpon onu detail-info ${onuIf}`);
+          const pon = buildPonOltIf(state, olt.id, target.board, target.port);
+          const onuIf = pon.onuIf(target.onu_index as number);
+          if (pon.isEpon) {
+            cmds.push(`show interface ${onuIf}`);
+            if (target.phase_state !== 'working') {
+              cmds.push(`show onu detail-info ${onuIf}`);
+            }
+          } else {
+            cmds.push(
+              `show interface ${onuIf}`,
+              `show gpon remote-onu ip-host ${onuIf}`,
+              `show gpon remote-onu pppoe ${onuIf}`,
+              `show gpon remote-onu wan-ip ${onuIf}`
+            );
+            if (target.phase_state !== 'working') {
+              cmds.push(`show gpon onu detail-info ${onuIf}`);
+            }
           }
         }
         roundRobinTelemetryCursor =
@@ -7348,15 +7526,19 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         if (u.olt_id !== olt.id || !u.is_authorized || u.onu_index === null) {
           return u;
         }
-        const key = `gpon-onu_1/${u.board}/${u.port}:${u.onu_index}`.toLowerCase();
         const coordKey = `1/${u.board}/${u.port}:${u.onu_index}`;
-        existingIfKeys.add(key);
+        const gponKey = `gpon-onu_${coordKey}`.toLowerCase();
+        const eponKey = `epon-onu_${coordKey}`.toLowerCase();
+        const key = buildPonOltIf(latestState, olt.id, u.board, u.port).onuIf(u.onu_index).toLowerCase();
+        existingIfKeys.add(coordKey);
+        existingIfKeys.add(gponKey);
+        existingIfKeys.add(eponKey);
 
-        const st = stateByIf.get(key);
+        const st = stateByIf.get(key) || stateByIf.get(eponKey) || stateByIf.get(gponKey);
         const cfgOnu = cfgByCoord.get(coordKey);
         const biOnu = baseinfoMap.get(coordKey);
-        const multiDet = multiDetailsMap.get(key);
-        const wanInfo = wanIpMap.get(key);
+        const multiDet = multiDetailsMap.get(key) || multiDetailsMap.get(eponKey) || multiDetailsMap.get(gponKey);
+        const wanInfo = wanIpMap.get(key) || wanIpMap.get(eponKey) || wanIpMap.get(gponKey);
         const isFocused = focusedOnu && u.id === focusedOnu.id;
 
         let nextPhase = st ? st.phaseState : multiDet?.phaseState || u.phase_state;
@@ -7496,7 +7678,7 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       const b = parseInt(m[2], 10);
       const p = parseInt(m[3], 10);
       const idx = parseInt(m[4], 10);
-      allDiscoveredCoords.set(`gpon-onu_1/${b}/${p}:${idx}`.toLowerCase(), {
+      allDiscoveredCoords.set(st.fullInterface.toLowerCase(), {
         board: b,
         port: p,
         onuIndex: idx,
@@ -7505,7 +7687,9 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       });
     }
     for (const o of parsedCfg.onus) {
-      const fullKey = `gpon-onu_1/${o.board}/${o.port}:${o.onuIndex}`.toLowerCase();
+      const fullKey = buildPonOltIf(latestState, olt.id, o.board, o.port)
+        .onuIf(o.onuIndex)
+        .toLowerCase();
       if (!allDiscoveredCoords.has(fullKey)) {
         allDiscoveredCoords.set(fullKey, {
           board: o.board,
@@ -7518,10 +7702,11 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
     }
 
     for (const [key, item] of allDiscoveredCoords.entries()) {
-      if (existingIfKeys.has(key)) continue;
+      const coordKey = `1/${item.board}/${item.port}:${item.onuIndex}`;
+      if (existingIfKeys.has(key) || existingIfKeys.has(coordKey)) continue;
       existingIfKeys.add(key);
+      existingIfKeys.add(coordKey);
       const { board, port, onuIndex } = item;
-      const coordKey = `1/${board}/${port}:${onuIndex}`;
       const cfgOnu = cfgByCoord.get(coordKey);
       const biOnu = baseinfoMap.get(coordKey);
       const det = multiDetailsMap.get(key);
@@ -7696,8 +7881,8 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         // Strictly physical/LAG Uplinks and PON ports only (ignore VLAN / sub-interfaces)
         const isUplink =
           /^(?:x?gei|smartgroup)(?:_|\d)/i.test(ifKey) && !ifKey.includes('.');
-        const isPonPort = /^gpon-olt_\d+\/\d+\/\d+$/i.test(ifKey);
-        const isOnuIf = /^gpon-onu_/i.test(ifKey);
+        const isPonPort = /^(?:gpon|epon)-olt_\d+\/\d+\/\d+$/i.test(ifKey);
+        const isOnuIf = /^(?:gpon|epon)-onu_/i.test(ifKey);
 
         if (isUplink || isPonPort) {
           const counterKey = `${olt.id}:${ifKey}`;
@@ -7764,7 +7949,8 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
             (u) =>
               u.olt_id === olt.id &&
               u.is_authorized &&
-              `gpon-onu_1/${u.board}/${u.port}:${u.onu_index}`.toLowerCase() === ifKey
+              (`gpon-onu_1/${u.board}/${u.port}:${u.onu_index}`.toLowerCase() === ifKey ||
+                `epon-onu_1/${u.board}/${u.port}:${u.onu_index}`.toLowerCase() === ifKey)
           );
           if (matchedOnu) {
             const counterKey = `${olt.id}:${ifKey}`;
@@ -8381,13 +8567,15 @@ function buildOnuTelemetryForPeriod(
 function buildAllPeriodsTelemetry(
   onu: OnuRecord,
   liveDownMbps?: number | null,
-  liveUpMbps?: number | null
+  liveUpMbps?: number | null,
+  onuInterfaceOverride?: string
 ) {
   const nowMs = Date.now();
   return {
     onuId: onu.id,
     serialNumber: onu.serial_number,
-    onuInterface: `gpon-onu_1/${onu.board}/${onu.port}:${onu.onu_index || 1}`,
+    onuInterface:
+      onuInterfaceOverride || `gpon-onu_1/${onu.board}/${onu.port}:${onu.onu_index || 1}`,
     polledAt: `${formatJakartaDateTimeFull(nowMs)} WIB`,
     periods: {
       Live2h: buildOnuTelemetryForPeriod(onu, 'Live2h', nowMs, liveDownMbps, liveUpMbps),
@@ -8409,9 +8597,10 @@ app.get('/api/onus/:id/telemetry', async (req, res) => {
       res.status(404).json({ ok: false, error: 'ONU not found' });
       return;
     }
+    const onuIf = buildPonOltIf(state, onu.olt_id, onu.board, onu.port).onuIf(onu.onu_index || 1);
     res.json({
       ok: true,
-      ...buildAllPeriodsTelemetry(onu),
+      ...buildAllPeriodsTelemetry(onu, undefined, undefined, onuIf),
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
@@ -8545,9 +8734,10 @@ app.post(
       }
     }
 
+    const recOnuIf = buildPonOltIf(state, onu.olt_id, onu.board, onu.port).onuIf(onu.onu_index || 1);
     res.json({
       ok: true,
-      ...buildAllPeriodsTelemetry(onu, liveDownMbps, liveUpMbps),
+      ...buildAllPeriodsTelemetry(onu, liveDownMbps, liveUpMbps, recOnuIf),
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
@@ -8582,14 +8772,21 @@ app.post('/api/onus/:id/poll-telemetry', async (req, res) => {
       return;
     }
 
-    const onuInterface = `gpon-onu_1/${onu.board}/${onu.port}:${onu.onu_index || 1}`;
-    const cliCommands = [
-      `show interface ${onuInterface}`,
-      `show pon power attenuation ${onuInterface}`,
-      `show gpon onu detail-info ${onuInterface}`,
-      `show gpon remote-onu ip-host ${onuInterface}`,
-      `show gpon remote-onu pppoe ${onuInterface}`,
-    ];
+    const pon = buildPonOltIf(state, olt.id, onu.board, onu.port);
+    const onuInterface = pon.onuIf(onu.onu_index || 1);
+    const cliCommands = pon.isEpon
+      ? [
+          `show interface ${onuInterface}`,
+          `show pon power attenuation ${onuInterface}`,
+          `show onu detail-info ${onuInterface}`,
+        ]
+      : [
+          `show interface ${onuInterface}`,
+          `show pon power attenuation ${onuInterface}`,
+          `show gpon onu detail-info ${onuInterface}`,
+          `show gpon remote-onu ip-host ${onuInterface}`,
+          `show gpon remote-onu pppoe ${onuInterface}`,
+        ];
 
     const telnetRes = await executeTelnetSession({
       host: olt.ip_address,
@@ -8748,7 +8945,7 @@ app.post('/api/onus/:id/poll-telemetry', async (req, res) => {
         onu: mergedOnu,
         onlineDuration: parsedDetail.onlineDuration || null,
         rawTraffic: parsedTraffic,
-        ...buildAllPeriodsTelemetry(mergedOnu, liveDownMbps, liveUpMbps),
+        ...buildAllPeriodsTelemetry(mergedOnu, liveDownMbps, liveUpMbps, onuInterface),
       });
       return;
     }
@@ -8757,7 +8954,7 @@ app.post('/api/onus/:id/poll-telemetry', async (req, res) => {
       ok: true,
       reachable: false,
       onu: updatedOnu,
-      ...buildAllPeriodsTelemetry(updatedOnu),
+      ...buildAllPeriodsTelemetry(updatedOnu, undefined, undefined, onuInterface),
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
@@ -8896,10 +9093,10 @@ function buildOltInterfacePeriodSeries(params: {
   let onuPortRows: TelemetrySampleRow[] = [];
   const ponMatch =
     interfaceType === 'PON'
-      ? interfaceName.match(/gpon-olt_(\d+\/\d+\/\d+)/i)
+      ? interfaceName.match(/(gpon|epon)-olt_(\d+\/\d+\/\d+)/i)
       : null;
   if (ponMatch) {
-    const prefix = `gpon-onu_${ponMatch[1].toLowerCase()}:%`;
+    const prefix = `${ponMatch[1].toLowerCase()}-onu_${ponMatch[2].toLowerCase()}:%`;
     onuPortRows = sqliteDb
       .prepare(
         `SELECT * FROM onu_telemetry_samples
@@ -9382,7 +9579,7 @@ app.post('/api/olts/:id/poll-graphs', async (req, res) => {
         (p) =>
           p &&
           p.olt_id === olt.id &&
-          /^gpon-olt_\d+\/\d+\/\d+$/i.test(String(p.interface_name || '').trim()) &&
+          /^(?:gpon|epon)-olt_\d+\/\d+\/\d+$/i.test(String(p.interface_name || '').trim()) &&
           (p.total_onus > 0 ||
             (state?.onus || []).some(
               (u) => u && u.olt_id === olt.id && u.port === p.port_number
@@ -9426,7 +9623,7 @@ app.post('/api/olts/:id/poll-graphs', async (req, res) => {
       for (const [ifKey, parsed] of parsedMap.entries()) {
         const isUplink =
           /^(?:x?gei|smartgroup)(?:_|\d)/i.test(ifKey) && !ifKey.includes('.');
-        const isPonPort = /^gpon-olt_\d+\/\d+\/\d+$/i.test(ifKey);
+        const isPonPort = /^(?:gpon|epon)-olt_\d+\/\d+\/\d+$/i.test(ifKey);
         if (!isUplink && !isPonPort) continue;
         const counterKey = `${olt.id}:${ifKey}`;
         const prev = lastOltIfCounterByKey.get(counterKey);
@@ -9618,13 +9815,16 @@ app.post(
       let telnetError: string | undefined;
 
       if (!rawOutput) {
+        const uncfgCmds = hasOltEponBoard(state, olt.id)
+          ? ['show gpon onu uncfg', 'show onu unauthentication']
+          : ['show gpon onu uncfg'];
         const telnetRes = await executeTelnetSession({
           host: olt.ip_address,
           port: olt.telnet_port,
           username: olt.olt_username,
           password: olt.olt_password,
           enablePassword: olt.enable_password,
-          commands: ['show gpon onu uncfg'],
+          commands: uncfgCmds,
           timeoutMs: 12000,
         });
         telnetReachable = telnetRes.reachable;

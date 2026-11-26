@@ -11,6 +11,9 @@ import {
   findNextAvailableOnuIndex,
   generateAuthorizeCliScript,
   resolveEffectiveEnableNat,
+  isEponBoard,
+  isEponInterface,
+  isMacAddressLike,
   OnuModeOption,
   WanModeOption,
   ConfigMethodOption,
@@ -173,11 +176,32 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
   const freeCount = Math.max(0, maxCapacity - usedCount);
   const usagePct = Math.round((usedCount / maxCapacity) * 100);
 
+  const detectedIsEpon = useMemo(() => {
+    const slotCard = (db.olt_cards || []).find(
+      (c) => c.olt_id === selectedOltId && c.slot === boardNum
+    );
+    if (slotCard) return isEponBoard(slotCard.real_type || slotCard.type);
+    const slotPort = db.pon_ports.find(
+      (p) =>
+        p.olt_id === selectedOltId &&
+        (p.slot === boardNum || Number(p.interface_name.split('/')[1]) === boardNum)
+    );
+    if (slotPort) {
+      return isEponInterface(slotPort.interface_name) || isEponBoard(slotPort.board_model);
+    }
+    if (isMacAddressLike(onu.serial_number)) return true;
+    const ponTypes = String(olt?.supported_pon_types || '').toUpperCase();
+    return ponTypes.includes('EPON') && !ponTypes.includes('GPON');
+  }, [db.olt_cards, db.pon_ports, selectedOltId, boardNum, onu.serial_number, olt]);
+
   const [usePreset, setUsePreset] = useState<boolean>(false);
   const [presetName, setPresetName] = useState<string>('None');
-  const [ponType, setPonType] = useState<'GPON' | 'EPON'>('GPON');
+  const [ponType, setPonType] = useState<'GPON' | 'EPON'>(detectedIsEpon ? 'EPON' : 'GPON');
+  useEffect(() => {
+    setPonType(detectedIsEpon ? 'EPON' : 'GPON');
+  }, [detectedIsEpon]);
   const [gponChannel, setGponChannel] = useState<'GPON' | 'XG-PON' | 'XGS-PON'>('GPON');
-  const [onuType, setOnuType] = useState<string>('ALL');
+  const [onuType, setOnuType] = useState<string>(detectedIsEpon ? 'ZTE-F460' : 'ALL');
   const [useCustomProfile, setUseCustomProfile] = useState<boolean>(true);
   const [serviceProfile, setServiceProfile] = useState<string>('Default (ALL)');
   const [onuMode, setOnuMode] = useState<OnuModeOption>('Routing');
@@ -361,13 +385,16 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
     customerName.trim().replace(/\s+/g, '-') ||
     onu.serial_number;
 
+  const targetOltIf = `${ponType === 'EPON' ? 'epon-olt_' : 'gpon-olt_'}1/${boardNum}/${portNum}`;
+  const targetOnuIf = `${ponType === 'EPON' ? 'epon-onu_' : 'gpon-onu_'}1/${boardNum}/${portNum}:${allocatedOnuIndex}`;
+
   const generatedCli = useMemo(() => {
     return generateAuthorizeCliScript({
       firmwareVersion: olt?.firmware_version || 'V2.1.0',
-      ponInterface: `gpon-olt_1/${boardNum}/${portNum}`,
+      ponInterface: targetOltIf,
       onuIndex: allocatedOnuIndex,
       serialNumber: onu.serial_number,
-      onuType: 'ALL',
+      onuType: ponType === 'EPON' ? onuType || 'ZTE-F460' : 'ALL',
       customerName: customerName.trim() || effectivePppoeUser || onu.serial_number,
       address: address.trim() || 'none',
       tcontProfile: selectedTcont?.profile_name || 'SMARTOLT-1G-UP',
@@ -497,7 +524,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
             Authorize ONU — SN: <span className="font-mono text-sky-400">{onu.serial_number}</span>
           </h2>
           <p className="text-xs text-slate-400">
-            Target Interface: <span className="font-mono text-emerald-400">gpon-onu_1/{boardNum}/{portNum}:{allocatedOnuIndex}</span> (Original catalog model: {onu.onu_type})
+            Target Interface: <span className="font-mono text-emerald-400">{targetOnuIf}</span> (Original catalog model: {onu.onu_type})
             {checkingPonLive ? (
               <span className="ml-2 text-amber-300">· Checking live OLT port indices...</span>
             ) : (
@@ -525,7 +552,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
         <div className="mb-6 hidden rounded-lg border border-slate-700 bg-slate-950 p-4">
           <div className="flex items-center justify-between pb-2">
             <span className="font-mono text-xs font-semibold text-emerald-400">
-              ZTE C320/C300 Auto-Provisioning CLI Script (`gpon-onu_1/{boardNum}/{portNum}:{allocatedOnuIndex}`)
+              ZTE C320/C300 Auto-Provisioning CLI Script (`{targetOnuIf}`)
             </span>
             <button
               type="button"
@@ -700,7 +727,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
             <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-300">
               <span>Allocated ONU Index on OLT:</span>
               <span className="rounded bg-emerald-950/90 border border-emerald-500/50 px-2 py-0.5 font-mono font-bold text-emerald-300">
-                onu {allocatedOnuIndex} (gpon-onu_1/{boardNum}/{portNum}:{allocatedOnuIndex})
+                onu {allocatedOnuIndex} ({targetOnuIf})
               </span>
               <input
                 type="number"

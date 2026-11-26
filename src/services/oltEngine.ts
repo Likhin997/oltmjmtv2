@@ -112,6 +112,59 @@ export function resolveEffectiveEnableNat(params: {
   return true;
 }
 
+export function isEponBoard(boardModel?: string | null): boolean {
+  const raw = String(boardModel || '').trim().toUpperCase();
+  if (!raw) return false;
+  return /^(ETG|EPON|ETXO|ETX)/i.test(raw);
+}
+
+export function isEponInterface(ifName?: string | null): boolean {
+  return /^epon-/i.test(String(ifName || '').trim());
+}
+
+export function isMacAddressLike(val?: string | null): boolean {
+  const s = String(val || '').trim();
+  if (!s) return false;
+  return (
+    /^[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}$/i.test(s) ||
+    /^([0-9a-f]{2}[:\-]){5}[0-9a-f]{2}$/i.test(s) ||
+    /^[0-9a-f]{12}$/i.test(s)
+  );
+}
+
+export function formatZteEponMac(val: string): string {
+  const hex = String(val || '').replace(/[^0-9a-fA-F]/g, '').toLowerCase();
+  if (hex.length === 12) {
+    return `${hex.slice(0, 4)}.${hex.slice(4, 8)}.${hex.slice(8, 12)}`;
+  }
+  return String(val || '').trim();
+}
+
+export function resolvePonInterfacePrefix(ponInterface: string): {
+  isEpon: boolean;
+  ponType: 'EPON' | 'GPON';
+  oltPrefix: 'epon-olt_' | 'gpon-olt_';
+  onuPrefix: 'epon-onu_' | 'gpon-onu_';
+  coords: string;
+  oltIf: string;
+  onuIf: (onuIndex: number) => string;
+} {
+  const trimmed = String(ponInterface || '').trim();
+  const isEpon = isEponInterface(trimmed);
+  const coords = trimmed.replace(/^(?:gpon|epon)-(?:olt|onu)_/i, '').replace(/:\d+$/, '');
+  const oltPrefix = isEpon ? 'epon-olt_' : 'gpon-olt_';
+  const onuPrefix = isEpon ? 'epon-onu_' : 'gpon-onu_';
+  return {
+    isEpon,
+    ponType: isEpon ? 'EPON' : 'GPON',
+    oltPrefix,
+    onuPrefix,
+    coords,
+    oltIf: `${oltPrefix}${coords}`,
+    onuIf: (onuIndex: number) => `${onuPrefix}${coords}:${onuIndex}`,
+  };
+}
+
 /**
  * Hapus seluruh token `nat enable` dan perintah `ip nat` / `nat` saat checkbox Enable NAT tidak dicentang.
  */
@@ -164,10 +217,10 @@ export function parseZteUncfgOutput(rawOutput: string): UncfgOnuParsed[] {
       'DYINGGASP',
     ]);
     if (ignored.has(t)) return false;
-    // Standard 12-char GPON SN (e.g. ZTEGC6A394D4, ZICGB370351A, HWTC1A2B3C4D)
-    // or 16-char Hex SN (e.g. 4857544312345678, 5A544547AABBCCDD)
-    // or 8-16 alphanumeric token containing at least 4 hex digits and letters
+    // Standard 12-char GPON SN (e.g. ZTEGC6A394D4), 16-char Hex SN,
+    // or EPON MAC address (e.g. aabb.ccdd.eeff, AA:BB:CC:DD:EE:FF, AA-BB-CC-DD-EE-FF)
     return (
+      isMacAddressLike(t) ||
       /^[A-Z]{4}[0-9A-F]{8}$/i.test(t) ||
       /^[A-Z]{4}[A-Z0-9]{8,12}$/i.test(t) ||
       /^[0-9A-F]{16}$/i.test(t) ||
@@ -175,45 +228,67 @@ export function parseZteUncfgOutput(rawOutput: string): UncfgOnuParsed[] {
     );
   };
 
+  let inEponUncfgSection = false;
+
   for (const rawLine of lines) {
     const line = rawLine.trim();
+    if (/show\s+onu\s+unauthentication|show\s+epon\s+onu\s+uncfg/i.test(line)) {
+      inEponUncfgSection = true;
+      continue;
+    }
+    if (/show\s+gpon\s+onu\s+uncfg/i.test(line)) {
+      inEponUncfgSection = false;
+      continue;
+    }
     if (
       !line ||
       line.startsWith('---') ||
       line.startsWith('%') ||
-      /^(?:onuindex|oltindex|interface|no\s+related)/i.test(line)
+      /^(?:onuindex|oltindex|interface|no\s+related|mac\s+address)/i.test(line)
     ) {
       continue;
     }
 
-    // Match `gpon-onu_1/3/3:1` or `gpon-olt_1/3/3` (or bare `1/3/3:1` on uncfg lines)
+    // Match `gpon-onu_1/3/3:1`, `epon-olt_1/2/1`, `epon-onu_1/2/1:1`, or bare `1/2/1`
     const ifMatch = line.match(
-      /(?:gpon-(?:onu|olt)_)?(\d+)\/(\d+)\/(\d+)(?::(\d+))?\s+(.+)$/i
+      /(?:(gpon|epon)-(?:onu|olt)_)?(\d+)\/(\d+)\/(\d+)(?::(\d+))?\s+(.+)$/i
     );
     if (!ifMatch) continue;
+    const explicitProto = (ifMatch[1] || '').toLowerCase();
+    const isEponLine =
+      explicitProto === 'epon' ||
+      (inEponUncfgSection && explicitProto !== 'gpon') ||
+      /[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}/i.test(line);
+
     // Avoid false positive from non-interface version/date strings unless prefix or uncfg context
-    if (!/gpon-(?:onu|olt)_/i.test(line) && !/(unknown|uncfg|n\/a)/i.test(line)) {
+    if (
+      !explicitProto &&
+      !isEponLine &&
+      !/(unknown|uncfg|n\/a|unauth)/i.test(line)
+    ) {
       continue;
     }
 
-    const rack = parseInt(ifMatch[1], 10);
-    const shelf = parseInt(ifMatch[2], 10);
-    const port = parseInt(ifMatch[3], 10);
-    const restTokens = ifMatch[5].trim().split(/\s+/).filter(Boolean);
+    const rack = parseInt(ifMatch[2], 10);
+    const shelf = parseInt(ifMatch[3], 10);
+    const port = parseInt(ifMatch[4], 10);
+    const restTokens = ifMatch[6].trim().split(/\s+/).filter(Boolean);
     if (restTokens.length === 0) continue;
 
     let sn = '';
-    let model = 'ALL';
+    let model = isEponLine ? 'ZTE-F460' : 'ALL';
     let fw = 'V2.1.0';
 
     const snIdx = restTokens.findIndex((tok) => isLikelySerialNumber(tok));
     if (snIdx === -1) continue;
 
-    sn = restTokens[snIdx].toUpperCase();
+    sn = isMacAddressLike(restTokens[snIdx])
+      ? formatZteEponMac(restTokens[snIdx]).toUpperCase()
+      : restTokens[snIdx].toUpperCase();
     // If there is a token before SN (not just numeric index like "1"), treat as model
     for (let i = 0; i < snIdx; i++) {
       const tok = restTokens[i];
-      if (!/^\d+$/.test(tok) && !/^(n\/a|-|none)$/i.test(tok)) {
+      if (!/^\d+$/.test(tok) && !/^(n\/a|-|none|epon|gpon)$/i.test(tok)) {
         model = tok.toUpperCase();
       }
     }
@@ -221,12 +296,18 @@ export function parseZteUncfgOutput(rawOutput: string): UncfgOnuParsed[] {
     for (let i = snIdx + 1; i < restTokens.length; i++) {
       const tok = restTokens[i];
       const low = tok.toLowerCase();
-      if (low === 'unknown' || low === 'uncfg' || low === 'n/a' || low === '-') {
+      if (
+        low === 'unknown' ||
+        low === 'uncfg' ||
+        low === 'n/a' ||
+        low === '-' ||
+        low === 'unauth'
+      ) {
         continue;
       }
       if (/^v\d+/i.test(tok)) {
         fw = tok;
-      } else if (model === 'ALL') {
+      } else if (model === 'ALL' || model === 'ZTE-F460') {
         model = tok.toUpperCase();
       }
     }
@@ -235,7 +316,7 @@ export function parseZteUncfgOutput(rawOutput: string): UncfgOnuParsed[] {
       model = 'F670LV9.0';
     }
 
-    const ponInterface = `gpon-olt_${rack}/${shelf}/${port}`;
+    const ponInterface = `${isEponLine ? 'epon-olt_' : 'gpon-olt_'}${rack}/${shelf}/${port}`;
     const dedupKey = `${ponInterface}:${sn}`;
     if (seenKeys.has(dedupKey)) continue;
     seenKeys.add(dedupKey);
@@ -329,7 +410,7 @@ export function normalizeZtePhaseState(
 }
 
 /**
- * 2. ALGORITMA REGEX PARSER: `show gpon onu state [gpon-olt_1/x/y]`
+ * 2. ALGORITMA REGEX PARSER: `show gpon onu state` & `show onu all-status` (ETGH/ETGO EPON)
  */
 export function parseZteOnuStateOutput(rawOutput: string): OnuStateParsed[] {
   const results: OnuStateParsed[] = [];
@@ -338,39 +419,72 @@ export function parseZteOnuStateOutput(rawOutput: string): OnuStateParsed[] {
   const lines = cleaned.split(/[\r\n]+/);
 
   const stateRegex =
-    /(?:gpon-onu_)?(\d+)\/(\d+)\/(\d+):(\d+)\s+(enable|disable|unlock|lock)\s+(enable|disable|up|down)\s+([A-Za-z0-9_\-]+)(?:\s+(\S+))?/i;
+    /(?:(gpon|epon)-onu_)?(\d+)\/(\d+)\/(\d+):(\d+)\s+(enable|disable|unlock|lock)\s+(enable|disable|up|down)\s+([A-Za-z0-9_\-]+)(?:\s+(\S+))?/i;
+
+  // ZTE ETGH/ETGO EPON `show onu all-status` format:
+  //   epon-onu_1/2/1:1    online
+  //   epon-onu_1/2/1:2    offline
+  //   epon-onu_1/2/1:3    dying-gasp
+  const eponStatusRegex =
+    /(epon-onu_)(\d+)\/(\d+)\/(\d+):(\d+)\s+(online|offline|working|dying-gasp|dyinggasp|power-off|poweroff|los|losi|lofi|lof|linkdown|auth-failed|authfailed|disable|enable)\b/i;
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
     if (!line || line.startsWith('---') || /^onuindex/i.test(line)) continue;
     const match = line.match(stateRegex);
-    if (!match) continue;
+    if (match) {
+      const proto = (match[1] || 'gpon').toLowerCase();
+      const isEpon = proto === 'epon';
+      const rack = match[2];
+      const slot = match[3];
+      const port = match[4];
+      const onuIndex = parseInt(match[5], 10);
+      const fullInterface = `${isEpon ? 'epon-onu_' : 'gpon-onu_'}${rack}/${slot}/${port}:${onuIndex}`;
+      const key = fullInterface.toLowerCase();
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
 
-    const rack = match[1];
-    const slot = match[2];
-    const port = match[3];
-    const onuIndex = parseInt(match[4], 10);
-    const fullInterface = `gpon-onu_${rack}/${slot}/${port}:${onuIndex}`;
-    const key = fullInterface.toLowerCase();
-    if (seenKeys.has(key)) continue;
-    seenKeys.add(key);
+      const adminRaw = match[6].toLowerCase();
+      const omccRaw = match[7].toLowerCase();
+      const phaseRaw = match[8];
+      const normalizedPhase = normalizeZtePhaseState(phaseRaw);
 
-    const adminRaw = match[5].toLowerCase();
-    const omccRaw = match[6].toLowerCase();
-    const phaseRaw = match[7];
+      results.push({
+        ponInterface: `${isEpon ? 'epon-olt_' : 'gpon-olt_'}${rack}/${slot}/${port}`,
+        onuIndex,
+        fullInterface,
+        adminState:
+          adminRaw === 'enable' || adminRaw === 'unlock' ? 'ENABLED' : 'DISABLED',
+        omccState: omccRaw === 'enable' || omccRaw === 'up' ? 'ENABLED' : 'DISABLED',
+        phaseState: normalizedPhase,
+        channel: match[9] || (isEpon ? '1(EPON)' : '1(GPON)'),
+      });
+      continue;
+    }
 
-    const normalizedPhase = normalizeZtePhaseState(phaseRaw);
+    const epMatch = line.match(eponStatusRegex);
+    if (epMatch) {
+      const rack = epMatch[2];
+      const slot = epMatch[3];
+      const port = epMatch[4];
+      const onuIndex = parseInt(epMatch[5], 10);
+      const fullInterface = `epon-onu_${rack}/${slot}/${port}:${onuIndex}`;
+      const key = fullInterface.toLowerCase();
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
 
-    results.push({
-      ponInterface: `gpon-olt_${rack}/${slot}/${port}`,
-      onuIndex,
-      fullInterface,
-      adminState:
-        adminRaw === 'enable' || adminRaw === 'unlock' ? 'ENABLED' : 'DISABLED',
-      omccState: omccRaw === 'enable' || omccRaw === 'up' ? 'ENABLED' : 'DISABLED',
-      phaseState: normalizedPhase,
-      channel: match[8] || '1(GPON)',
-    });
+      const phaseRaw = epMatch[6];
+      const normalizedPhase = normalizeZtePhaseState(phaseRaw);
+      results.push({
+        ponInterface: `epon-olt_${rack}/${slot}/${port}`,
+        onuIndex,
+        fullInterface,
+        adminState: phaseRaw.toLowerCase() === 'disable' ? 'DISABLED' : 'ENABLED',
+        omccState: normalizedPhase === 'working' ? 'ENABLED' : 'DISABLED',
+        phaseState: normalizedPhase,
+        channel: '1(EPON)',
+      });
+    }
   }
 
   return results;
@@ -382,36 +496,39 @@ export interface OnuBaseinfoParsed {
   onuIndex: number;
   onuType: string;
   serialNumber: string;
+  ponType?: 'GPON' | 'EPON';
 }
 
 /**
- * 2a. ALGORITMA REGEX PARSER: `show gpon onu baseinfo [gpon-olt_1/x/y]`
- * Contoh baris ZTE C300/C320:
- *   gpon-onu_1/3/2:1   ALL          sn     SN:ZTEGC6A3802C   ready
- *   1/3/2:2            ZTE-F670L    sn     SN:ZTEGC6A394D4   enable
+ * 2a. ALGORITMA REGEX PARSER: `show gpon onu baseinfo` & EPON `show onu baseinfo`
  */
 export function parseZteOnuBaseinfoOutput(rawOutput: string): Map<string, OnuBaseinfoParsed> {
   const map = new Map<string, OnuBaseinfoParsed>();
   const cleaned = cleanZteCliText(rawOutput);
   const lines = cleaned.split(/[\r\n]+/);
   const baseinfoRegex =
-    /(?:gpon-onu_)?(\d+)\/(\d+)\/(\d+):(\d+)\s+([A-Za-z0-9\-_.]+)\s+(?:sn|mac|pw|loid|\S+)\s+(?:SN:)?([A-Z0-9]{8,16})/i;
+    /(?:(gpon|epon)-onu_)?(\d+)\/(\d+)\/(\d+):(\d+)\s+([A-Za-z0-9\-_.]+)\s+(?:sn|mac|pw|loid|\S+)\s+(?:SN:|MAC:)?([0-9A-Fa-f.\-:]{8,17}|[A-Z0-9]{8,16})/i;
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
     if (!line || line.startsWith('---') || /^onuindex/i.test(line)) continue;
     const m = line.match(baseinfoRegex);
     if (!m) continue;
-    const board = parseInt(m[2], 10);
-    const port = parseInt(m[3], 10);
-    const onuIndex = parseInt(m[4], 10);
+    const proto = (m[1] || 'gpon').toLowerCase();
+    const board = parseInt(m[3], 10);
+    const port = parseInt(m[4], 10);
+    const onuIndex = parseInt(m[5], 10);
+    const rawSn = m[7].trim();
     const key = `1/${board}/${port}:${onuIndex}`;
     map.set(key, {
       board,
       port,
       onuIndex,
-      onuType: m[5].trim().toUpperCase(),
-      serialNumber: m[6].trim().toUpperCase(),
+      onuType: m[6].trim().toUpperCase(),
+      serialNumber: isMacAddressLike(rawSn)
+        ? formatZteEponMac(rawSn).toUpperCase()
+        : rawSn.toUpperCase(),
+      ponType: proto === 'epon' || isMacAddressLike(rawSn) ? 'EPON' : 'GPON',
     });
   }
   return map;
@@ -472,7 +589,7 @@ export function parseZteOnuDetailInfo(rawOutput: string): OnuDetailInfoParsed {
 }
 
 /**
- * 2b-multi. Multi-ONU `show gpon onu detail-info gpon-onu_1/B/P:I` Parser
+ * 2b-multi. Multi-ONU `show gpon onu detail-info` & `show onu detail-info` (EPON) Parser
  */
 export function parseZteMultiOnuDetailInfo(
   rawOutput: string
@@ -480,7 +597,7 @@ export function parseZteMultiOnuDetailInfo(
   const map = new Map<string, OnuDetailInfoParsed>();
   const cleaned = cleanZteCliText(rawOutput);
   const regex =
-    /show\s+gpon\s+onu\s+detail-info\s+(gpon-onu_\d+\/\d+\/\d+:\d+)([\s\S]*?)(?=show\s+gpon\s+|show\s+running-config|show\s+onu\s+|show\s+pon\s+|$)/gi;
+    /show\s+(?:(?:gpon|epon)\s+)?onu\s+detail-info\s+((?:gpon|epon)-onu_\d+\/\d+\/\d+:\d+)([\s\S]*?)(?=show\s+gpon\s+|show\s+epon\s+|show\s+running-config|show\s+onu\s+|show\s+pon\s+|$)/gi;
   let m: RegExpExecArray | null;
   while ((m = regex.exec(cleaned)) !== null) {
     const fullIf = m[1].trim().toLowerCase();
@@ -603,7 +720,7 @@ export function parseZteMultiWanIpOutput(
 ): Map<string, WanIpParsed> {
   const map = new Map<string, WanIpParsed>();
   const regex =
-    /show\s+gpon\s+remote-onu\s+(?:ip-host|pppoe|wan-ip)\s+(gpon-onu_\d+\/\d+\/\d+:\d+)([\s\S]*?)(?=show\s+gpon\s+(?:remote-onu|onu)|show\s+pon\s+power|$)/gi;
+    /show\s+(?:gpon|epon)\s+remote-onu\s+(?:ip-host|pppoe|wan-ip)\s+((?:gpon|epon)-onu_\d+\/\d+\/\d+:\d+)([\s\S]*?)(?=show\s+(?:gpon|epon)\s+(?:remote-onu|onu)|show\s+pon\s+power|$)/gi;
   let m: RegExpExecArray | null;
   while ((m = regex.exec(rawOutput)) !== null) {
     const key = m[1].trim().toLowerCase();
@@ -631,8 +748,8 @@ export function parseZteMultiWanIpOutput(
 }
 
 /**
- * 2e. Parser Tabel Redaman Optik per Port PON:
- * `show pon power onu-rx gpon-olt_1/3/2` atau `show pon power olt-rx gpon-olt_1/3/2`
+ * 2e. Parser Tabel Redaman Optik per Port PON (GPON & EPON ETGH/ETGO):
+ * `show pon power onu-rx gpon-olt_1/3/2` atau `show pon power onu-rx epon-olt_1/2/1`
  */
 export function parseZtePonPowerRxTable(
   rawOutput: string
@@ -641,7 +758,7 @@ export function parseZtePonPowerRxTable(
   const cleaned = rawOutput.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
   const lines = cleaned.split(/[\r\n]+/);
   const rowRegex =
-    /^\s*(gpon-onu_\d+\/\d+\/\d+:\d+)\s+([+-]?\d+(?:\.\d+)?(?=\s*\(dbm\))|N\/A|no\s+signal)/i;
+    /^\s*((?:gpon|epon)-onu_\d+\/\d+\/\d+:\d+)\s+([+-]?\d+(?:\.\d+)?(?=\s*\(dbm\))|N\/A|no\s+signal)/i;
 
   for (const line of lines) {
     const m = line.match(rowRegex);
@@ -841,7 +958,7 @@ export function parseZteMultiInterfaceTraffic(
 
   // Fallback: also match blocks starting with `<ifName> is up/down` if command echo was omitted
   const headerRegex =
-    /(?:^|[\r\n])\s*((?:x?gei|smartgroup|gpon-olt|gpon-onu)[A-Za-z0-9_\-\/:.]+)\s+is\s+(?:up|down|administratively\s+down)([\s\S]*?)(?=(?:^|[\r\n])\s*(?:x?gei|smartgroup|gpon-olt|gpon-onu)[A-Za-z0-9_\-\/:.]+\s+is\s+|show\s+interface\s+|$)/gi;
+    /(?:^|[\r\n])\s*((?:x?gei|smartgroup|gpon-olt|gpon-onu|epon-olt|epon-onu)[A-Za-z0-9_\-\/:.]+)\s+is\s+(?:up|down|administratively\s+down)([\s\S]*?)(?=(?:^|[\r\n])\s*(?:x?gei|smartgroup|gpon-olt|gpon-onu|epon-olt|epon-onu)[A-Za-z0-9_\-\/:.]+\s+is\s+|show\s+interface\s+|$)/gi;
   let hm: RegExpExecArray | null;
   while ((hm = headerRegex.exec(cleaned)) !== null) {
     const ifName = hm[1].trim().toLowerCase();
@@ -1008,9 +1125,9 @@ export function buildTr069CliLines(params: {
  *   pppoe 1 nat enable user <USER> password <PASS>, vlan-filter, dhcp-ip ethuni eth_0/1..8 from-onu, security-mgmt
  */
 export function generateAuthorizeCliScript(params: CliProvisioningParams): string {
-  const coords = params.ponInterface.replace(/^gpon-olt_/i, ''); // contoh: 1/3/3
-  const oltIf = `gpon-olt_${coords}`;
-  const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
+  const pon = resolvePonInterfacePrefix(params.ponInterface);
+  const oltIf = pon.oltIf;
+  const onuIf = pon.onuIf(params.onuIndex);
   const cleanName =
     params.customerName
       .replace(/[^a-zA-Z0-9_\-. ]/g, '')
@@ -1032,6 +1149,98 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
   const configMethod: ConfigMethodOption = params.configMethod || 'OMCI';
   const wanRemoteAccess: WanRemoteAccessOption =
     params.wanRemoteAccess || 'Enabled from everywhere in the internet';
+
+  // ZTE C300/C320 ETGH/ETGO (EPON) Provisioning CLI Script
+  if (pon.isEpon) {
+    const eponOnuType =
+      params.onuType && params.onuType.trim() && params.onuType.toUpperCase() !== 'ALL'
+        ? params.onuType.trim()
+        : 'ZTE-F460';
+    const isMac = isMacAddressLike(params.serialNumber);
+    const idKeyword = isMac ? 'mac' : 'sn';
+    const idVal = isMac
+      ? formatZteEponMac(params.serialNumber)
+      : params.serialNumber.trim().toUpperCase();
+    const isMgmtOnlyEpon = Boolean(params.mgmtOnlyNoInternet);
+    const mgmtVlanIdEpon =
+      params.tr069MgmtVlanId && params.tr069MgmtVlanId > 0
+        ? params.tr069MgmtVlanId
+        : isMgmtOnlyEpon
+        ? params.vlanId
+        : 100;
+    const effectiveEnableNatEpon = resolveEffectiveEnableNat({
+      enableNat: params.enableNat,
+      vlanName: params.vlanName,
+      isMgmtOnly: isMgmtOnlyEpon,
+    });
+    const epLines: string[] = [
+      `configure terminal`,
+      `interface ${oltIf}`,
+      `  onu ${params.onuIndex} type ${eponOnuType} ${idKeyword} ${idVal}`,
+      `exit`,
+      `interface ${onuIf}`,
+      `  name ${cleanName}`,
+      `  description ${cleanDesc}`,
+      `  switchport mode trunk`,
+      `  switchport vlan ${isMgmtOnlyEpon ? mgmtVlanIdEpon : params.vlanId} tag`,
+    ];
+    if (!isMgmtOnlyEpon && (configMethod === 'TR069' || params.tr069Enabled)) {
+      epLines.push(`  switchport vlan ${mgmtVlanIdEpon} tag`);
+    }
+    if (params.hotspotBridgeVlan && params.hotspotBridgeVlan !== params.vlanId) {
+      epLines.push(`  switchport vlan ${params.hotspotBridgeVlan} tag`);
+    }
+    epLines.push(`exit`, `pon-onu-mng ${onuIf}`, `  auto-config`);
+    if (onuMode === 'Bridging' || params.wanMode === 'BRIDGE') {
+      epLines.push(
+        `  vlan port eth_0/1 mode tag vlan ${params.vlanId}`,
+        `  vlan port eth_0/2 mode tag vlan ${params.vlanId}`,
+        `  vlan port eth_0/3 mode tag vlan ${params.vlanId}`,
+        `  vlan port eth_0/4 mode tag vlan ${params.vlanId}`
+      );
+    } else if (!isMgmtOnlyEpon && params.wanMode === 'PPPOE') {
+      const rawUser = params.pppoeUsername ? params.pppoeUsername.trim() : cleanName;
+      const user = rawUser.replace(/\s+/g, '-') || cleanName;
+      const pass = (params.pppoePassword || 'jetcyber').trim().replace(/\s+/g, '');
+      epLines.push(
+        effectiveEnableNatEpon
+          ? `  pppoe 1 nat enable user ${user} password ${pass}`
+          : `  pppoe 1 user ${user} password ${pass}`,
+        `  vlan port eth_0/1 mode untag`,
+        `  vlan port eth_0/2 mode untag`,
+        `  vlan port eth_0/3 mode untag`,
+        `  vlan port eth_0/4 mode untag`
+      );
+    } else if (!isMgmtOnlyEpon && params.wanMode === 'DHCP') {
+      epLines.push(
+        `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`,
+        `  vlan port eth_0/1 mode untag`
+      );
+    } else if (!isMgmtOnlyEpon && params.wanMode === 'STATIC_IP') {
+      const ip = params.staticIpAddress || '172.16.10.50';
+      const mask = params.staticSubnetMask || '255.255.255.0';
+      const gw = params.staticGateway || '172.16.10.1';
+      epLines.push(`  ip-host 1 ip ${ip} mask ${mask} gateway ${gw}`);
+    }
+    if (isMgmtOnlyEpon || configMethod === 'TR069' || params.tr069Enabled) {
+      const acsUrl = (params.tr069AcsUrl || 'http://10.69.69.1:14501').trim();
+      const acsUser = (params.tr069AcsUsername || 'acsNet').trim();
+      const acsPass = (params.tr069AcsPassword || 'acsNet@2024').trim();
+      const trPri = typeof params.tr069Priority === 'number' ? params.tr069Priority : 2;
+      epLines.push(
+        `  tr069-mgmt 1 state unlock`,
+        `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
+        `  tr069-mgmt 1 tag pri ${trPri} vlan ${mgmtVlanIdEpon}`
+      );
+    }
+    epLines.push(
+      ...buildWanRemoteAccessCliLines(wanRemoteAccess, params.wanRemoteAllowedSubnet),
+      `exit`,
+      `end`,
+      `write`
+    );
+    return (effectiveEnableNatEpon ? epLines : stripNatCommandsFromCliLines(epLines)).join('\n');
+  }
 
   // SmartOLT ZTE C300 standard: always register with `type ALL` and 8 ethuni ports
   // to avoid OMCI Equipment-ID mismatch that blocks PPPoE ME creation on ZTE ONUs.
@@ -1252,9 +1461,9 @@ export function generateUpdateOnuModeCliScript(params: {
   wifiSsid?: string;
   wifiPassword?: string;
 }): string {
-  const coords = params.ponInterface.replace(/^gpon-olt_/i, '');
-  const oltIf = `gpon-olt_${coords}`;
-  const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
+  const pon = resolvePonInterfacePrefix(params.ponInterface);
+  const oltIf = pon.oltIf;
+  const onuIf = pon.onuIf(params.onuIndex);
   const cleanName =
     (params.customerName || params.pppoeUsername || params.serialNumber)
       .replace(/[^a-zA-Z0-9_\-. ]/g, '')
@@ -1287,6 +1496,90 @@ export function generateUpdateOnuModeCliScript(params: {
     typeof params.tr069Priority === 'number' ? params.tr069Priority : 2;
   const mgmtTcontProfile = params.tr069TcontProfile || 'SMARTOLT-VOIPMNG-10M';
   const mgmtTrafficProfile = params.tr069TrafficProfile || 'SMARTOLT-VOIPMNG-10M';
+
+  if (pon.isEpon) {
+    const isMac = isMacAddressLike(params.serialNumber);
+    const idKeyword = isMac ? 'mac' : 'sn';
+    const idVal = isMac
+      ? formatZteEponMac(params.serialNumber)
+      : params.serialNumber.trim().toUpperCase();
+    const epLines: string[] = [`configure terminal`];
+    if (params.rebindTypeAll) {
+      epLines.push(
+        `interface ${oltIf}`,
+        `  no onu ${params.onuIndex}`,
+        `  onu ${params.onuIndex} type ZTE-F460 ${idKeyword} ${idVal}`,
+        `exit`
+      );
+    }
+    epLines.push(
+      `interface ${onuIf}`,
+      `  name ${cleanName}`,
+      `  description ${cleanDesc}`,
+      `  switchport mode trunk`,
+      `  switchport vlan ${isMgmtOnly ? mgmtVlanId : params.vlanId} tag`
+    );
+    if (!isMgmtOnly && params.configMethod === 'TR069') {
+      epLines.push(`  switchport vlan ${mgmtVlanId} tag`);
+    }
+    epLines.push(`exit`, `pon-onu-mng ${onuIf}`, `  auto-config`);
+    if (params.onuMode === 'Bridging') {
+      epLines.push(
+        `  no pppoe 1`,
+        `  vlan port eth_0/1 mode tag vlan ${params.vlanId}`,
+        `  vlan port eth_0/2 mode tag vlan ${params.vlanId}`,
+        `  vlan port eth_0/3 mode tag vlan ${params.vlanId}`,
+        `  vlan port eth_0/4 mode tag vlan ${params.vlanId}`
+      );
+    } else if (!isMgmtOnly) {
+      if (params.wanMode === 'PPPOE') {
+        const user =
+          (params.pppoeUsername || cleanName).trim().replace(/\s+/g, '-') || cleanName;
+        const pass = (params.pppoePassword || 'jetcyber').trim().replace(/\s+/g, '');
+        if (!params.rebindTypeAll) epLines.push(`  no pppoe 1`);
+        epLines.push(
+          effectiveEnableNat
+            ? `  pppoe 1 nat enable user ${user} password ${pass}`
+            : `  pppoe 1 user ${user} password ${pass}`
+        );
+      } else if (params.wanMode === 'DHCP') {
+        epLines.push(
+          `  no pppoe 1`,
+          `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`
+        );
+      } else if (params.wanMode === 'STATIC_IP') {
+        epLines.push(
+          `  no pppoe 1`,
+          `  ip-host 1 ip ${params.staticIpAddress || '172.16.10.50'} mask ${params.staticSubnetMask || '255.255.255.0'} gateway ${params.staticGateway || '172.16.10.1'}`
+        );
+      }
+    }
+    if (isMgmtOnly || params.configMethod === 'TR069') {
+      const acsUrl = (params.tr069AcsUrl || 'http://10.69.69.1:14501').trim();
+      const acsUser = (params.tr069AcsUsername || 'acsNet').trim();
+      const acsPass = (params.tr069AcsPassword || 'acsNet@2024').trim();
+      epLines.push(
+        `  tr069-mgmt 1 state unlock`,
+        `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
+        `  tr069-mgmt 1 tag pri ${tr069Pri} vlan ${mgmtVlanId}`
+      );
+    }
+    if (params.wifiSsid && params.wifiSsid.trim()) {
+      const cleanSsid = params.wifiSsid.trim().replace(/\s+/g, '_');
+      const cleanWifiPass = (params.wifiPassword || '').trim().replace(/\s+/g, '');
+      epLines.push(`  wifi enable`, `  ssid ctrl wifi_0/1 name ${cleanSsid}`);
+      if (cleanWifiPass) {
+        epLines.push(`  ssid auth wpa wifi_0/1 wpa2-psk encrypt aes key ${cleanWifiPass}`);
+      }
+    }
+    epLines.push(
+      ...buildWanRemoteAccessCliLines(params.wanRemoteAccess, params.wanRemoteAllowedSubnet),
+      `exit`,
+      `end`,
+      `write`
+    );
+    return (effectiveEnableNat ? epLines : stripNatCommandsFromCliLines(epLines)).join('\n');
+  }
 
   const lines: string[] = [`configure terminal`];
 
@@ -1539,8 +1832,8 @@ export function generateUpdateAttachedVlansCliScript(params: {
   existingVlanIds?: number[];
   mgmtVlanId?: number | null;
 }): string {
-  const coords = params.ponInterface.replace(/^gpon-olt_/i, '');
-  const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
+  const pon = resolvePonInterfacePrefix(params.ponInterface);
+  const onuIf = pon.onuIf(params.onuIndex);
   const mgmtVid = params.mgmtVlanId && params.mgmtVlanId > 0 ? params.mgmtVlanId : null;
 
   const uniqueVlans = Array.from(
@@ -1565,6 +1858,23 @@ export function generateUpdateAttachedVlansCliScript(params: {
   // Jika semua VLAN yang dipilih sudah ada di ONU dan tidak ada penghapusan, jangan push config!
   if (addedVlans.length === 0 && removedVlans.length === 0) {
     return '';
+  }
+
+  if (pon.isEpon) {
+    const epLines: string[] = [
+      `! Update Attached VLANs EPON (${onuIf}) — Tambah: ${addedVlans.join(', ') || 'none'}`,
+      `configure terminal`,
+      `interface ${onuIf}`,
+      `  switchport mode trunk`,
+    ];
+    for (const vid of removedVlans) {
+      epLines.push(`  no switchport vlan ${vid}`);
+    }
+    for (const vid of addedVlans) {
+      epLines.push(`  switchport vlan ${vid} tag`);
+    }
+    epLines.push(`exit`, `end`, `write`);
+    return epLines.join('\n');
   }
 
   const lines: string[] = [
@@ -1635,8 +1945,8 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
   trafficProfile?: string;
   voipSipEnabled?: boolean;
 }): string {
-  const coords = params.ponInterface.replace(/^gpon-olt_/i, '');
-  const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
+  const pon = resolvePonInterfacePrefix(params.ponInterface);
+  const onuIf = pon.onuIf(params.onuIndex);
   const mgmtVlan = params.mgmtVlanId > 0 ? params.mgmtVlanId : 100;
   const pri =
     typeof params.priority === 'number' && params.priority >= 0 && params.priority <= 7
@@ -1652,6 +1962,32 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
     params.mgmtIpMode !== 'INACTIVE' ||
     params.keepServicePortActive ||
     (params.tr069Enabled && params.tr069Interface === 'MGMT_IP');
+
+  if (pon.isEpon) {
+    const epLines: string[] = [
+      `! Update Management & TR069 EPON (${onuIf}) — VLAN ${mgmtVlan}`,
+      `configure terminal`,
+      `interface ${onuIf}`,
+    ];
+    if (needMgmtServicePort) {
+      epLines.push(`  switchport mode trunk`, `  switchport vlan ${mgmtVlan} tag`);
+    } else {
+      epLines.push(`  no switchport vlan ${mgmtVlan}`);
+    }
+    epLines.push(`exit`, `pon-onu-mng ${onuIf}`, `  no tr069-mgmt 1`);
+    if (params.tr069Enabled) {
+      const trTargetVlan =
+        params.tr069Interface === 'WAN' ? params.wanVlanId || mgmtVlan : mgmtVlan;
+      const trPri = params.tr069Interface === 'WAN' ? 0 : pri;
+      epLines.push(
+        `  tr069-mgmt 1 state unlock`,
+        `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
+        `  tr069-mgmt 1 tag pri ${trPri} vlan ${trTargetVlan}`
+      );
+    }
+    epLines.push(`exit`, `end`, `write`);
+    return epLines.join('\n');
+  }
 
   const lines: string[] = [
     `! Update Management & TR069 (${onuIf}) — VLAN ${mgmtVlan} (Tanpa Mengubah Setting WAN PPPoE)`,
@@ -1801,8 +2137,8 @@ export function generateTr069CwmpRpcPreview(params: {
 }
 
 export function generateRebootCliScript(ponInterface: string, onuIndex: number): string {
-  const coords = ponInterface.replace(/^gpon-olt_/i, '');
-  const onuIf = `gpon-onu_${coords}:${onuIndex}`;
+  const pon = resolvePonInterfacePrefix(ponInterface);
+  const onuIf = pon.onuIf(onuIndex);
   return [
     `configure terminal`,
     `pon-onu-mng ${onuIf}`,
@@ -1813,8 +2149,8 @@ export function generateRebootCliScript(ponInterface: string, onuIndex: number):
 }
 
 export function generateFactoryResetCliScript(ponInterface: string, onuIndex: number): string {
-  const coords = ponInterface.replace(/^gpon-olt_/i, '');
-  const onuIf = `gpon-onu_${coords}:${onuIndex}`;
+  const pon = resolvePonInterfacePrefix(ponInterface);
+  const onuIf = pon.onuIf(onuIndex);
   return [
     `configure terminal`,
     `pon-onu-mng ${onuIf}`,
@@ -1833,13 +2169,30 @@ export function generateUpdatePppoeCliScript(
   wanRemoteAccess: WanRemoteAccessOption = 'Enabled from everywhere in the internet',
   enableNat = true
 ): string {
-  const coords = ponInterface.replace(/^gpon-olt_/i, '');
-  const onuIf = `gpon-onu_${coords}:${onuIndex}`;
+  const pon = resolvePonInterfacePrefix(ponInterface);
+  const onuIf = pon.onuIf(onuIndex);
   const cleanUser = pppoeUsername.trim().replace(/\s+/g, '-');
   const cleanPass = pppoePassword.trim().replace(/\s+/g, '');
   const pppoeLine = enableNat
     ? `  pppoe 1 nat enable user ${cleanUser} password ${cleanPass}`
     : `  pppoe 1 user ${cleanUser} password ${cleanPass}`;
+  if (pon.isEpon) {
+    const epLines = [
+      `configure terminal`,
+      `interface ${onuIf}`,
+      `  switchport mode trunk`,
+      `  switchport vlan ${vlanId} tag`,
+      `exit`,
+      `pon-onu-mng ${onuIf}`,
+      `  no pppoe 1`,
+      pppoeLine,
+      ...buildWanRemoteAccessCliLines(wanRemoteAccess),
+      `exit`,
+      `end`,
+      `write`,
+    ];
+    return (enableNat ? epLines : stripNatCommandsFromCliLines(epLines)).join('\n');
+  }
   const lines = [
     `configure terminal`,
     `interface ${onuIf}`,
@@ -1876,8 +2229,8 @@ export function generateUpdatePppoeCliScript(
 }
 
 export function generateDeleteOnuCliScript(ponInterface: string, onuIndex: number): string {
-  const coords = ponInterface.replace(/^gpon-olt_/i, '');
-  const oltIf = `gpon-olt_${coords}`;
+  const pon = resolvePonInterfacePrefix(ponInterface);
+  const oltIf = pon.oltIf;
   return [
     `configure terminal`,
     `interface ${oltIf}`,
@@ -2022,12 +2375,12 @@ export function generateOnuEthPortCliScript(params: {
   vlanId: number;
   dhcpMode: 'From ONU' | 'From Internet';
 }): string {
-  const coords = params.ponInterface.replace(/^gpon-olt_/i, '');
-  const oltIf = `gpon-olt_${coords}`;
-  const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
+  const pon = resolvePonInterfacePrefix(params.ponInterface);
+  const oltIf = pon.oltIf;
+  const onuIf = pon.onuIf(params.onuIndex);
   const lines = [`configure terminal`];
 
-  if (params.mode === 'Tag VLAN') {
+  if (!pon.isEpon && params.mode === 'Tag VLAN') {
     lines.push(
       `onu-pnp`,
       `  onu-uni-vlan ${oltIf} ${params.ethPort} mode tag vlan ${params.vlanId}`,
@@ -2043,19 +2396,24 @@ export function generateOnuEthPortCliScript(params: {
   );
 
   if (params.mode === 'Tag VLAN') {
-    lines.push(`  flow 1 pri 0 vlan ${params.vlanId}`);
+    lines.push(
+      pon.isEpon
+        ? `  vlan port ${params.ethPort} mode tag vlan ${params.vlanId}`
+        : `  flow 1 pri 0 vlan ${params.vlanId}`
+    );
   } else if (params.mode === 'Transparent') {
     lines.push(`  vlan port ${params.ethPort} mode transparent`);
   }
 
-  lines.push(
-    params.dhcpMode === 'From Internet'
-      ? `  dhcp-ip ethuni ${params.ethPort} from-internet`
-      : `  dhcp-ip ethuni ${params.ethPort} from-onu`,
-    `exit`,
-    `end`,
-    `write`
-  );
+  if (!pon.isEpon) {
+    lines.push(
+      params.dhcpMode === 'From Internet'
+        ? `  dhcp-ip ethuni ${params.ethPort} from-internet`
+        : `  dhcp-ip ethuni ${params.ethPort} from-onu`
+    );
+  }
+
+  lines.push(`exit`, `end`, `write`);
   return lines.join('\n');
 }
 
@@ -2132,7 +2490,21 @@ export interface ParsedRunningConfigSummary {
 export function parseZteCardOutput(rawText: string): ParsedOltCard[] {
   const cardsMap = new Map<number, ParsedOltCard>();
 
-  // 1. From `add-card rackno 1 shelfno 1 slotno 3 GTGH` in running-config
+  const inferCardPortCount = (ctype: string): number | null => {
+    const c = ctype.toUpperCase();
+    if (c.startsWith('GTGO') || c.startsWith('ETGO') || c.startsWith('GTXO') || c.startsWith('GFGL')) {
+      return 8;
+    }
+    if (c.startsWith('GTG') || c.startsWith('ETG') || c.startsWith('GFGH') || c.startsWith('ETX')) {
+      return 16;
+    }
+    if (c.startsWith('HUV') || c.startsWith('HUQ')) {
+      return 4;
+    }
+    return null;
+  };
+
+  // 1. From `add-card rackno 1 shelfno 1 slotno 3 GTGH` / `slotno 2 ETGH` in running-config
   const addCardRegex = /add-card\s+rackno\s+\d+\s+shelfno\s+\d+\s+slotno\s+(\d+)\s+(\S+)/gi;
   let acm: RegExpExecArray | null;
   while ((acm = addCardRegex.exec(rawText)) !== null) {
@@ -2142,15 +2514,7 @@ export function parseZteCardOutput(rawText: string): ParsedOltCard[] {
       slot,
       type: ctype,
       realType: ctype,
-      ports: ctype.startsWith('GTGO')
-        ? 8
-        : ctype.startsWith('GTG') || ctype.startsWith('GFGH')
-          ? 16
-          : ctype.startsWith('GTXO') || ctype.startsWith('GFGL')
-            ? 8
-            : ctype.startsWith('HUV') || ctype.startsWith('HUQ')
-              ? 4
-              : null,
+      ports: inferCardPortCount(ctype),
       swVersion: 'V2.1.0',
       status: 'Online',
       role: 'Main',
@@ -2159,6 +2523,7 @@ export function parseZteCardOutput(rawText: string): ParsedOltCard[] {
 
   // 2. From `show card` output:
   // 1    1     3    GTGH    GTGH     16     V1.0.0  V2.1.0          Insigh
+  // 1    1     2    ETGH    ETGH     16     V1.0.0  V2.1.0          Insigh
   const showCardRegex =
     /^\s*\d+\s+\d+\s+(\d+)\s+([A-Z0-9]{3,8})\s+([A-Z0-9]{3,8})?\s*(\d+)?\s*(?:V[\d.]+\s+)?(V[\d.P]+)?\s*(Insigh|Inservice|Online|Standby|Offline)/gim;
   let scm: RegExpExecArray | null;
@@ -2166,7 +2531,7 @@ export function parseZteCardOutput(rawText: string): ParsedOltCard[] {
     const slot = parseInt(scm[1], 10);
     const cfgType = scm[2].toUpperCase();
     const realType = (scm[3] || cfgType).toUpperCase();
-    const ports = scm[4] ? parseInt(scm[4], 10) : cfgType.startsWith('GTG') ? 16 : null;
+    const ports = scm[4] ? parseInt(scm[4], 10) : inferCardPortCount(realType || cfgType);
     const swVer = scm[5] || 'V2.1.0';
     const rawStat = (scm[6] || 'Online').toLowerCase();
     const status: ParsedOltCard['status'] =
@@ -2285,17 +2650,17 @@ export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConf
     });
   }
 
-  // 3. Parse `interface gpon-olt_1/x/y` for ONU registrations & port admin state (`shutdown` / `description`)
-  // Note: Only terminate on top-level block boundaries (`!`, `end`, `interface gpon-...`, `pon-onu-mng`)
+  // 3. Parse `interface gpon-olt_1/x/y` & `interface epon-olt_1/x/y` (ETGH/ETGO) for ONU registrations & port admin state
   const oltBlockRegex =
-    /interface\s+gpon-olt_(\d+)\/(\d+)\/(\d+)([\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|$)/gim;
+    /interface\s+(gpon|epon)-olt_(\d+)\/(\d+)\/(\d+)([\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|epon-olt|epon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|$)/gim;
   let ob: RegExpExecArray | null;
   while ((ob = oltBlockRegex.exec(rawConfig)) !== null) {
-    const rack = parseInt(ob[1], 10);
-    const board = parseInt(ob[2], 10);
-    const port = parseInt(ob[3], 10);
-    const body = ob[4];
-    const interfaceName = `gpon-olt_${rack}/${board}/${port}`;
+    const proto = ob[1].toLowerCase();
+    const rack = parseInt(ob[2], 10);
+    const board = parseInt(ob[3], 10);
+    const port = parseInt(ob[4], 10);
+    const body = ob[5];
+    const interfaceName = `${proto}-olt_${rack}/${board}/${port}`;
     const isShutdown =
       /^\s*shutdown\b/im.test(body) && !/^\s*no\s+shutdown\b/im.test(body);
     const descM = body.match(/^\s*description\s+([^\r\n]+)/im);
@@ -2312,7 +2677,10 @@ export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConf
     let ol: RegExpExecArray | null;
     while ((ol = onuLineRegex.exec(body)) !== null) {
       const onuIndex = parseInt(ol[1], 10);
-      const snClean = ol[3].trim().replace(/^SN:/i, '').toUpperCase();
+      const rawId = ol[3].trim().replace(/^(?:SN:|MAC:)/i, '');
+      const snClean = isMacAddressLike(rawId)
+        ? formatZteEponMac(rawId).toUpperCase()
+        : rawId.toUpperCase();
       const key = `1/${board}/${port}:${onuIndex}`;
       const prev = onuMap.get(key);
       onuMap.set(key, {
@@ -2339,7 +2707,7 @@ export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConf
     }
   }
 
-  // 3b. Also merge any `show gpon onu baseinfo` rows if present in rawConfig
+  // 3b. Also merge any `show gpon onu baseinfo` / EPON baseinfo rows if present in rawConfig
   const baseinfoMap = parseZteOnuBaseinfoOutput(rawConfig);
   for (const [key, bi] of baseinfoMap.entries()) {
     const existing = onuMap.get(key);
@@ -2373,9 +2741,9 @@ export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConf
     }
   }
 
-  // 4. Parse `interface gpon-onu_1/x/y:z` (also auto-create entry if oltBlock was not in snippet)
+  // 4. Parse `interface gpon-onu_1/x/y:z` & `interface epon-onu_1/x/y:z`
   const onuIfRegex =
-    /interface\s+gpon-onu_(\d+)\/(\d+)\/(\d+):(\d+)([\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|$)/gim;
+    /interface\s+(?:gpon|epon)-onu_(\d+)\/(\d+)\/(\d+):(\d+)([\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|epon-olt|epon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|$)/gim;
   let oib: RegExpExecArray | null;
   while ((oib = onuIfRegex.exec(rawConfig)) !== null) {
     const board = parseInt(oib[2], 10);
@@ -2426,14 +2794,31 @@ export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConf
       if (!vlansMap.has(svlan)) {
         vlansMap.set(svlan, svlan === 101 ? 'PPPOE' : `VLAN_${svlan}`);
       }
+    } else {
+      // EPON (ETGH/ETGO): `switchport vlan 101 tag` / `switchport vlan 101,102 tag`
+      const epVlanRegex = /^\s*switchport\s+vlan\s+([0-9,\-]+)\s+(?:tag|untag)/gim;
+      let evm: RegExpExecArray | null;
+      let firstEpVlan: number | null = null;
+      while ((evm = epVlanRegex.exec(body)) !== null) {
+        const nums = expandVlanSpecToNumbers(evm[1]);
+        for (const vid of nums) {
+          if (!vlansMap.has(vid)) {
+            vlansMap.set(vid, vid === 101 ? 'PPPOE' : `VLAN_${vid}`);
+          }
+          if (firstEpVlan === null) {
+            firstEpVlan = vid;
+            existing.vlanId = vid;
+          } else if (vid !== existing.vlanId && !existing.extraFlowVlans.includes(vid)) {
+            existing.extraFlowVlans.push(vid);
+          }
+        }
+      }
     }
   }
 
-  // 5. Parse `pon-onu-mng gpon-onu_1/x/y:z`
-  // IMPORTANT: Do NOT terminate on `interface eth` or `interface wifi` inside `pon-onu-mng`,
-  // and do NOT terminate on `end-src-ip`!
+  // 5. Parse `pon-onu-mng gpon-onu_1/x/y:z` & `pon-onu-mng epon-onu_1/x/y:z`
   const mngRegex =
-    /pon-onu-mng\s+gpon-onu_(\d+)\/(\d+)\/(\d+):(\d+)([\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|$)/gim;
+    /pon-onu-mng\s+(?:gpon|epon)-onu_(\d+)\/(\d+)\/(\d+):(\d+)([\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|epon-olt|epon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|$)/gim;
   let mb: RegExpExecArray | null;
   while ((mb = mngRegex.exec(rawConfig)) !== null) {
     const board = parseInt(mb[2], 10);

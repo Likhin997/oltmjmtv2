@@ -37,6 +37,9 @@ import {
 } from '../services/mockDatabase';
 import {
   generateAuthorizeCliScript,
+  isEponBoard,
+  isEponInterface,
+  isMacAddressLike,
   OnuModeOption,
   WanModeOption,
 } from '../services/oltEngine';
@@ -210,15 +213,35 @@ export function buildAutoTaskCliScript(params: {
       }`
     : null;
 
+  const slotCard = (db.olt_cards || []).find(
+    (c) => c.olt_id === onu.olt_id && c.slot === onu.board
+  );
+  const slotPort = (db.pon_ports || []).find(
+    (p) =>
+      p.olt_id === onu.olt_id &&
+      (p.slot === onu.board || Number(p.interface_name.split('/')[1]) === onu.board)
+  );
+  const isEponSlot = slotCard
+    ? isEponBoard(slotCard.real_type || slotCard.type)
+    : slotPort
+    ? isEponInterface(slotPort.interface_name) || isEponBoard(slotPort.board_model)
+    : (String(olt?.supported_pon_types || '').toUpperCase().includes('EPON') &&
+        !String(olt?.supported_pon_types || '').toUpperCase().includes('GPON')) ||
+      isMacAddressLike(onu.serial_number);
+  const ponOltInterface = `${isEponSlot ? 'epon-olt_' : 'gpon-olt_'}1/${onu.board}/${onu.port}`;
+  const ponOnuInterface = `${isEponSlot ? 'epon-onu_' : 'gpon-onu_'}1/${onu.board}/${onu.port}:${allocatedIndex}`;
+
   const baseCli = generateAuthorizeCliScript({
     firmwareVersion: olt?.firmware_version || 'V2.1.0',
-    ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
+    ponInterface: ponOltInterface,
     onuIndex: allocatedIndex,
     onuType:
       task.onu_model && task.onu_model !== 'ALL'
         ? task.onu_model
         : onu.onu_type && onu.onu_type !== 'ALL'
         ? onu.onu_type
+        : isEponSlot
+        ? 'ZTE-F460'
         : 'ALL',
     serialNumber: onu.serial_number,
     customerName: `AUTO-${snLast4}`,
@@ -249,7 +272,7 @@ export function buildAutoTaskCliScript(params: {
   if (task.mgmt_ip_mode !== 'INACTIVE' || task.tr069_enabled) {
     extraMngLines.push(
       `configure terminal`,
-      `pon-onu-mng gpon-onu_1/${onu.board}/${onu.port}:${allocatedIndex}`
+      `pon-onu-mng ${ponOnuInterface}`
     );
     const mgmtVlan = task.mgmt_vlan_id || task.vlan_id || 100;
     if (task.mgmt_ip_mode === 'DHCP') {
@@ -277,8 +300,10 @@ export function buildAutoTaskCliScript(params: {
 
   // Verification commands on OLT
   const verifyCommands = [
-    `show gpon onu detail-info gpon-onu_1/${onu.board}/${onu.port}:${allocatedIndex}`,
-    `show running-config interface gpon-onu_1/${onu.board}/${onu.port}:${allocatedIndex}`,
+    isEponSlot
+      ? `show onu detail-info ${ponOnuInterface}`
+      : `show gpon onu detail-info ${ponOnuInterface}`,
+    `show running-config interface ${ponOnuInterface}`,
   ];
 
   const fullCli = [
@@ -289,7 +314,7 @@ export function buildAutoTaskCliScript(params: {
 
   const rollbackScript = [
     `configure terminal`,
-    `interface gpon-olt_1/${onu.board}/${onu.port}`,
+    `interface ${ponOltInterface}`,
     `  no onu ${allocatedIndex}`,
     `exit`,
     `exit`,

@@ -13,6 +13,8 @@ import {
   generateUplinkConfigCliScript,
   generateCreateVlanCliScript,
   isNatExcludedVlanName,
+  isEponBoard,
+  isEponInterface,
 } from '../services/oltEngine';
 import { PrtgTrafficGraph, PrtgTrafficSeries } from './PrtgTrafficGraph';
 import {
@@ -314,40 +316,61 @@ Rack Shelf Slot CfgType RealType Port   HardVer SoftVer         Status
   const gponSlotGroups: Array<{
     slot: number;
     boardModel: string;
+    isEpon: boolean;
     ports: PonPortRecord[];
   }> = (() => {
     const oltPonPorts = db.pon_ports.filter((p) => p.olt_id === olt.id);
-    const slotMeta = new Map<number, { boardModel: string; portCount: number }>();
+    const slotMeta = new Map<number, { boardModel: string; portCount: number; isEpon: boolean }>();
 
     for (const c of oltCards) {
       const ct = (c.real_type || c.type || '').toUpperCase();
       const isPonCard =
-        /^(GTG|GTH|GFG|ETG|GPON|EPON|XPON)/i.test(ct) ||
+        /^(GTG|GTH|GFG|ETG|ETX|GPON|EPON|XPON)/i.test(ct) ||
         ((c.ports || 0) >= 8 &&
           c.slot <= 17 &&
           !/^(SCX|SMX|PRW|HUV|HUQ|GUF|XUT|GUT)/i.test(ct));
       if (isPonCard) {
         const count =
-          c.ports && c.ports > 0 ? c.ports : ct.startsWith('GTGO') ? 8 : 16;
-        slotMeta.set(c.slot, { boardModel: ct || 'GTGH', portCount: count });
+          c.ports && c.ports > 0
+            ? c.ports
+            : ct.startsWith('GTGO') || ct.startsWith('ETGO')
+              ? 8
+              : 16;
+        slotMeta.set(c.slot, {
+          boardModel: ct || 'GTGH',
+          portCount: count,
+          isEpon: isEponBoard(ct),
+        });
       }
     }
 
     for (const p of oltPonPorts) {
       const slotNum = p.slot || Number(p.interface_name.split('/')[1]) || 3;
+      const isEp = isEponInterface(p.interface_name) || isEponBoard(p.board_model);
       const existing = slotMeta.get(slotNum);
       if (!existing) {
         slotMeta.set(slotNum, {
-          boardModel: p.board_model || 'GTGH',
+          boardModel: p.board_model || (isEp ? 'ETGH' : 'GTGH'),
           portCount: Math.max(p.port_number, p.port_number > 8 ? 16 : 8),
+          isEpon: isEp,
         });
-      } else if (p.port_number > existing.portCount) {
-        existing.portCount = p.port_number > 8 ? 16 : p.port_number;
+      } else {
+        if (p.port_number > existing.portCount) {
+          existing.portCount = p.port_number > 8 ? 16 : p.port_number;
+        }
+        if (isEp) existing.isEpon = true;
       }
     }
 
     if (slotMeta.size === 0) {
-      slotMeta.set(3, { boardModel: 'GTGH', portCount: 16 });
+      const epOnly =
+        String(olt.supported_pon_types || '').toUpperCase().includes('EPON') &&
+        !String(olt.supported_pon_types || '').toUpperCase().includes('GPON');
+      slotMeta.set(3, {
+        boardModel: epOnly ? 'ETGH' : 'GTGH',
+        portCount: 16,
+        isEpon: epOnly,
+      });
     }
 
     const txValues = [
@@ -358,11 +381,13 @@ Rack Shelf Slot CfgType RealType Port   HardVer SoftVer         Status
     return Array.from(slotMeta.entries())
       .sort((a, b) => a[0] - b[0])
       .map(([slotNum, meta]) => {
+        const prefix = meta.isEpon ? 'epon-olt_' : 'gpon-olt_';
+        const defaultCap = meta.isEpon ? 64 : 128;
         const ports: PonPortRecord[] = Array.from(
           { length: meta.portCount },
           (_, idx) => {
             const portNum = idx + 1;
-            const ifName = `gpon-olt_1/${slotNum}/${portNum}`;
+            const ifName = `${prefix}1/${slotNum}/${portNum}`;
             const existing = oltPonPorts.find(
               (p) =>
                 p.interface_name.toLowerCase() === ifName.toLowerCase() ||
@@ -392,13 +417,14 @@ Rack Shelf Slot CfgType RealType Port   HardVer SoftVer         Status
               total_onus: 0,
               avg_signal_dbm: null,
               tx_power_dbm: txValues[idx % txValues.length] || 10.5,
-              max_onu_capacity: 128,
+              max_onu_capacity: defaultCap,
             };
           }
         );
         return {
           slot: slotNum,
           boardModel: meta.boardModel,
+          isEpon: meta.isEpon,
           ports,
         };
       });
@@ -1425,10 +1451,10 @@ ${oltVlans
                   void onSyncOltLive(olt.id);
                 }
                 const slotList = filteredGponSlotGroups
-                  .map((g) => `gpon-olt_1/${g.slot}/1..${g.ports.length}`)
+                  .map((g) => `${g.isEpon ? 'epon-olt_' : 'gpon-olt_'}1/${g.slot}/1..${g.ports.length}`)
                   .join(', ');
                 setLastCliBanner({
-                  title: `Refreshing ${visiblePonPorts.length} GPON Ports Info (${slotList})`,
+                  title: `Refreshing ${visiblePonPorts.length} PON Ports Info (${slotList})`,
                   cli: `${olt.name}# show running-config / show card\nPolling real admin state (shutdown / no shutdown), optical TX power & active ONUs.`,
                 });
               }}
@@ -1452,7 +1478,7 @@ ${oltVlans
                       'write',
                     ].join('\n');
                     setLastCliBanner({
-                      title: `Enabling ${visiblePonPorts.length} GPON Ports on ${olt.name}`,
+                      title: `Enabling ${visiblePonPorts.length} PON Ports on ${olt.name}`,
                       cli: cliPreview,
                     });
                   }}
@@ -1464,7 +1490,7 @@ ${oltVlans
                   type="button"
                   onClick={() => {
                     const slotRanges = filteredGponSlotGroups
-                      .map((g) => `gpon-olt_1/${g.slot}/1-${g.ports.length}`)
+                      .map((g) => `${g.isEpon ? 'epon-olt_' : 'gpon-olt_'}1/${g.slot}/1-${g.ports.length}`)
                       .join(', ');
                     setLastCliBanner({
                       title: `Batch Reboot All ONUs Executed on ${olt.name}`,
@@ -1482,11 +1508,11 @@ ${oltVlans
               onClick={() => {
                 setRogueStatus('No rogue ONU detected (Clean)');
                 const slotRanges = filteredGponSlotGroups
-                  .map((g) => `gpon-olt_1/${g.slot}/1-${g.ports.length}`)
+                  .map((g) => `${g.isEpon ? 'epon-olt_' : 'gpon-olt_'}1/${g.slot}/1-${g.ports.length}`)
                   .join(', ');
                 setLastCliBanner({
                   title: `Rogue ONU Laser Diagnostic Completed`,
-                  cli: `${olt.name}# show gpon rogue-onu ${slotRanges}\nResult: 0 continuous-mode rogue lasers detected across ${visiblePonPorts.length} PON ports.`,
+                  cli: `${olt.name}# show pon rogue-onu ${slotRanges}\nResult: 0 continuous-mode rogue lasers detected across ${visiblePonPorts.length} PON ports.`,
                 });
               }}
               className="flex items-center gap-1 rounded bg-[#d9534f] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#c9302c]"
@@ -1506,7 +1532,7 @@ ${oltVlans
               <option value="Any">Any</option>
               {gponSlotGroups.map((g) => (
                 <option key={g.slot} value={String(g.slot)}>
-                  Slot {g.slot} ({g.boardModel})
+                  Slot {g.slot} ({g.boardModel} · {g.isEpon ? 'EPON' : 'GPON'})
                 </option>
               ))}
             </select>
@@ -1517,7 +1543,7 @@ ${oltVlans
             <div key={group.slot} className="space-y-2.5">
               <div className="flex flex-wrap items-center justify-between pt-1">
                 <h3 className="text-base font-bold text-white">
-                  OLT slot {group.slot}, board type: {group.boardModel}
+                  OLT slot {group.slot}, board type: {group.boardModel} ({group.isEpon ? 'EPON' : 'GPON'})
                 </h3>
                 {!isReadOnly && (
                   <div className="flex items-center gap-4 text-xs text-sky-400">
@@ -1541,7 +1567,7 @@ ${oltVlans
                       onClick={() =>
                         setLastCliBanner({
                           title: `Rebooted All ONUs on Slot ${group.slot} (${group.boardModel})`,
-                          cli: `configure terminal\ninterface range gpon-olt_1/${group.slot}/1-${group.ports.length}\n  onu reboot all\nexit\nend`,
+                          cli: `configure terminal\ninterface range ${group.isEpon ? 'epon-olt_' : 'gpon-olt_'}1/${group.slot}/1-${group.ports.length}\n  onu reboot all\nexit\nend`,
                         })
                       }
                       className="hover:underline"
@@ -1571,15 +1597,20 @@ ${oltVlans
                   </thead>
                   <tbody className="divide-y divide-[#1e3a5f]/70">
                     {group.ports.map((p) => {
-                      const pct = Math.round(
-                        (p.total_onus / (p.max_onu_capacity || 128)) * 100
-                      );
+                      const isPortEpon =
+                        group.isEpon ||
+                        isEponInterface(p.interface_name) ||
+                        isEponBoard(p.board_model);
+                      const maxCap = p.max_onu_capacity || (isPortEpon ? 64 : 128);
+                      const pct = Math.round((p.total_onus / maxCap) * 100);
                       return (
                         <tr key={p.interface_name} className="hover:bg-[#132842]/50">
                           <td className="px-3 py-2.5 font-mono text-white">
                             {p.port_number}
                           </td>
-                          <td className="px-3 py-2.5 text-white">GPON</td>
+                          <td className="px-3 py-2.5 text-white">
+                            {isPortEpon ? 'EPON' : 'GPON'}
+                          </td>
                           <td className="px-3 py-2.5 text-white">
                             {p.admin_state === 'ENABLED' ? 'Enabled' : 'Disabled'}
                           </td>

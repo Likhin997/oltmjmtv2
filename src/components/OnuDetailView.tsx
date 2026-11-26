@@ -20,6 +20,9 @@ import {
   generateUpdateMgmtAndTr069CliScript,
   buildTr069CliLines,
   resolveEffectiveEnableNat,
+  isEponBoard,
+  isEponInterface,
+  isMacAddressLike,
   parseZteOpticalAttenuation,
   parseZteOnuDetailInfo,
   parseZteWanIpOutput,
@@ -432,7 +435,24 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   const [configuringEthPort, setConfiguringEthPort] =
     useState<EthPortSetting | null>(null);
 
-  const onuInterface = `gpon-onu_1/${onu.board}/${onu.port}:${onu.onu_index || 1}`;
+  const isSlotEpon = (slotNum: number): boolean => {
+    const slotCard = (db.olt_cards || []).find(
+      (c) => c.olt_id === olt.id && c.slot === slotNum
+    );
+    if (slotCard) return isEponBoard(slotCard.real_type || slotCard.type);
+    const slotPort = db.pon_ports.find(
+      (p) =>
+        p.olt_id === olt.id &&
+        (p.slot === slotNum || Number(p.interface_name.split('/')[1]) === slotNum)
+    );
+    if (slotPort) {
+      return isEponInterface(slotPort.interface_name) || isEponBoard(slotPort.board_model);
+    }
+    return isMacAddressLike(onu.serial_number);
+  };
+  const isEponOnu = isSlotEpon(onu.board);
+  const onuPonInterface = `${isEponOnu ? 'epon-olt_' : 'gpon-olt_'}1/${onu.board}/${onu.port}`;
+  const onuInterface = `${isEponOnu ? 'epon-onu_' : 'gpon-onu_'}1/${onu.board}/${onu.port}:${onu.onu_index || 1}`;
   const distanceKm = (onu.distance_m / 1000).toFixed(2);
 
   // Helper that immediately pushes CLI changes to the OLT via Telnet and displays live output
@@ -504,14 +524,20 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   };
 
   const pollLiveOnuStatusAndWanIp = async (showInConsole = false) => {
-    const cliCommands = [
-      `show interface ${onuInterface}`,
-      `show gpon onu detail-info ${onuInterface}`,
-      `show pon power attenuation ${onuInterface}`,
-      `show gpon remote-onu ip-host ${onuInterface}`,
-      `show gpon remote-onu pppoe ${onuInterface}`,
-      `show gpon remote-onu wan-ip ${onuInterface}`,
-    ];
+    const cliCommands = isEponOnu
+      ? [
+          `show interface ${onuInterface}`,
+          `show onu detail-info ${onuInterface}`,
+          `show pon power attenuation ${onuInterface}`,
+        ]
+      : [
+          `show interface ${onuInterface}`,
+          `show gpon onu detail-info ${onuInterface}`,
+          `show pon power attenuation ${onuInterface}`,
+          `show gpon remote-onu ip-host ${onuInterface}`,
+          `show gpon remote-onu pppoe ${onuInterface}`,
+          `show gpon remote-onu wan-ip ${onuInterface}`,
+        ];
     const cliJoined = cliCommands.slice(0, 5).join('\n');
 
     if (showInConsole) {
@@ -687,10 +713,10 @@ Username:              ${onu.pppoe_username || onu.customer_name || onu.serial_n
   const handleShowRunningConfig = async () => {
     const script = generateAuthorizeCliScript({
       firmwareVersion: olt.firmware_version,
-      ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
+      ponInterface: onuPonInterface,
       onuIndex: onu.onu_index || 1,
       serialNumber: onu.serial_number,
-      onuType: 'ALL',
+      onuType: isEponOnu ? onu.onu_type || 'ZTE-F460' : 'ALL',
       customerName: onu.customer_name || onu.serial_number,
       address: onu.address || 'none',
       tcontProfile: tcontProfile?.profile_name || 'SMARTOLT-1G-UP',
@@ -764,7 +790,11 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           oltId: olt.id,
-          commands: [`show gpon remote-onu equip ${onuInterface}`],
+          commands: [
+            isEponOnu
+              ? `show onu detail-info ${onuInterface}`
+              : `show gpon remote-onu equip ${onuInterface}`,
+          ],
         }),
       });
       const data = await resp.json();
@@ -908,7 +938,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
 
   const handleReboot = () => {
     const cli = generateRebootCliScript(
-      `gpon-olt_1/${onu.board}/${onu.port}`,
+      onuPonInterface,
       onu.onu_index || 1
     );
     void executeAndDisplayLivePush('REBOOT', cli, undefined, `Reboot ONU — ${onuInterface}`);
@@ -917,7 +947,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
   const handleResync = () => {
     const script = generateUpdateOnuModeCliScript({
       firmwareVersion: olt.firmware_version,
-      ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
+      ponInterface: onuPonInterface,
       onuIndex: onu.onu_index || 1,
       serialNumber: onu.serial_number,
       customerName: onu.customer_name || onu.pppoe_username || onu.serial_number,
@@ -947,16 +977,16 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
       'RESYNC_CONFIG',
       script,
       {
-        onu_type: 'ALL',
+        onu_type: isEponOnu ? onu.onu_type || 'ZTE-F460' : 'ALL',
         phase_state: 'working',
       },
-      `Full Resync Config (${isOnuMgmtOnly ? `Mgmt VLAN ${effectiveMgmtVlan} TR069+VoIP` : 'type ALL + PPPoE'}) — ${onuInterface}`
+      `Full Resync Config (${isOnuMgmtOnly ? `Mgmt VLAN ${effectiveMgmtVlan} TR069+VoIP` : isEponOnu ? 'EPON ETGH' : 'type ALL + PPPoE'}) — ${onuInterface}`
     );
   };
 
   const handleRestoreDefaults = () => {
     const cli = generateFactoryResetCliScript(
-      `gpon-olt_1/${onu.board}/${onu.port}`,
+      onuPonInterface,
       onu.onu_index || 1
     );
     void executeAndDisplayLivePush(
@@ -969,7 +999,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
 
   const handleDelete = () => {
     const cli = generateDeleteOnuCliScript(
-      `gpon-olt_1/${onu.board}/${onu.port}`,
+      onuPonInterface,
       onu.onu_index || 1
     );
     void executeAndDisplayLivePush('DELETE_ONU', cli, undefined, `Delete ONU — ${onuInterface}`);
@@ -980,7 +1010,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
     const cleanUser = inlinePppoeUser.trim().replace(/\s+/g, '-') || onu.serial_number;
     const cleanPass = inlinePppoePass.trim().replace(/\s+/g, '') || 'jetcyber';
     const cli = generateUpdatePppoeCliScript(
-      `gpon-olt_1/${onu.board}/${onu.port}`,
+      onuPonInterface,
       onu.onu_index || 1,
       vlan?.vlan_id || 101,
       cleanUser,
@@ -2444,7 +2474,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                   )
                 );
                 const cli = generateOnuEthPortCliScript({
-                  ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
+                  ponInterface: onuPonInterface,
                   onuIndex: onu.onu_index || 1,
                   ethPort: `eth_0/${configuringEthPort.portIdx}`,
                   adminState: configuringEthPort.adminState,
@@ -2599,11 +2629,14 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
+                  const targetIsEpon = isSlotEpon(moveBoard);
+                  const targetPonIf = `${targetIsEpon ? 'epon-olt_' : 'gpon-olt_'}1/${moveBoard}/${movePort}`;
+                  const targetOnuIf = `${targetIsEpon ? 'epon-onu_' : 'gpon-onu_'}1/${moveBoard}/${movePort}:${moveIndex}`;
                   const reAuthCli = generateAuthorizeCliScript({
                     firmwareVersion: olt.firmware_version,
-                    ponInterface: `gpon-olt_1/${moveBoard}/${movePort}`,
+                    ponInterface: targetPonIf,
                     onuIndex: moveIndex,
-                    onuType: 'ALL',
+                    onuType: targetIsEpon ? onu.onu_type || 'ZTE-F460' : 'ALL',
                     serialNumber: onu.serial_number,
                     customerName: onu.customer_name || onu.serial_number,
                     address: onu.address || 'none',
@@ -2637,7 +2670,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                   });
                   const cli = [
                     'configure terminal',
-                    `interface gpon-olt_1/${onu.board}/${onu.port}`,
+                    `interface ${onuPonInterface}`,
                     `  no onu ${onu.onu_index || 1}`,
                     'exit',
                     'end',
@@ -2652,7 +2685,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                       port: movePort,
                       onu_index: moveIndex,
                     },
-                    `Move & Re-provision ONU ${onu.serial_number} -> gpon-onu_1/${moveBoard}/${movePort}:${moveIndex}`
+                    `Move & Re-provision ONU ${onu.serial_number} -> ${targetOnuIf}`
                   );
                 }}
                 className="space-y-3"
@@ -2754,7 +2787,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
 
                   const cli = generateUpdateOnuModeCliScript({
                     firmwareVersion: olt.firmware_version,
-                    ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
+                    ponInterface: onuPonInterface,
                     onuIndex: onu.onu_index || 1,
                     serialNumber: cleanSn,
                     customerName: cleanCliName,
@@ -3190,7 +3223,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     ).filter((vid) => vid !== effectiveMgmtVlan);
 
                     const cli = generateUpdateAttachedVlansCliScript({
-                      ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
+                      ponInterface: onuPonInterface,
                       onuIndex: onu.onu_index || 1,
                       attachedVlanIds: finalVlans,
                       existingVlanIds: currentAttachedVlanIds,
@@ -3392,7 +3425,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     e.preventDefault();
                     const trEnabled = mgmtTr069ProfileId !== 'NONE' && Boolean(selectedProf);
                     const cli = generateUpdateMgmtAndTr069CliScript({
-                      ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
+                      ponInterface: onuPonInterface,
                       onuIndex: onu.onu_index || 1,
                       tr069Enabled: trEnabled,
                       tr069Interface: mgmtTr069Interface,

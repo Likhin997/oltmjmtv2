@@ -7660,18 +7660,53 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 ],
                 olt_cards: [
                   ...prev.olt_cards,
-                  {
-                    id: Date.now() + 1,
-                    olt_id: nextId,
-                    slot: 3,
-                    type: 'GTGH',
-                    real_type: 'GTGH',
-                    ports: 16,
-                    sw_version: '2.1.0',
-                    status: 'Online',
-                    role: 'Main',
-                    updated_at: nowStr,
-                  },
+                  ...(() => {
+                    const ponTypesUpper = String(newOltData.supported_pon_types || '').toUpperCase();
+                    const isEponOnly = ponTypesUpper.includes('EPON') && !ponTypesUpper.includes('GPON');
+                    const isDualPon = ponTypesUpper.includes('EPON') && ponTypesUpper.includes('GPON');
+                    const ponCards = isDualPon
+                      ? [
+                          {
+                            id: Date.now() + 1,
+                            olt_id: nextId,
+                            slot: 2,
+                            type: 'ETGH',
+                            real_type: 'ETGH',
+                            ports: 16,
+                            sw_version: '2.1.0',
+                            status: 'Online' as const,
+                            role: 'Main' as const,
+                            updated_at: nowStr,
+                          },
+                          {
+                            id: Date.now() + 4,
+                            olt_id: nextId,
+                            slot: 3,
+                            type: 'GTGH',
+                            real_type: 'GTGH',
+                            ports: 16,
+                            sw_version: '2.1.0',
+                            status: 'Online' as const,
+                            role: 'Main' as const,
+                            updated_at: nowStr,
+                          },
+                        ]
+                      : [
+                          {
+                            id: Date.now() + 1,
+                            olt_id: nextId,
+                            slot: 3,
+                            type: isEponOnly ? 'ETGH' : 'GTGH',
+                            real_type: isEponOnly ? 'ETGH' : 'GTGH',
+                            ports: 16,
+                            sw_version: '2.1.0',
+                            status: 'Online' as const,
+                            role: 'Main' as const,
+                            updated_at: nowStr,
+                          },
+                        ];
+                    return ponCards;
+                  })(),
                   {
                     id: Date.now() + 2,
                     olt_id: nextId,
@@ -7766,24 +7801,33 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 ],
                 pon_ports: [
                   ...prev.pon_ports,
-                  ...Array.from({ length: 16 }, (_, idx) => ({
-                    id: nextId * 100 + idx + 1,
-                    olt_id: nextId,
-                    rack: 1,
-                    shelf: 3,
-                    slot: 3,
-                    port_number: idx + 1,
-                    interface_name: `gpon-olt_1/3/${idx + 1}`,
-                    board_model: 'GTGH',
-                    description: `PON 1/3/${idx + 1}`,
-                    admin_state: 'ENABLED' as const,
-                    oper_status: 'Up' as const,
-                    online_onus: 0,
-                    total_onus: 0,
-                    avg_signal_dbm: null,
-                    tx_power_dbm: 10.5,
-                    max_onu_capacity: 128,
-                  })),
+                  ...(() => {
+                    const ponTypesUpper = String(newOltData.supported_pon_types || '').toUpperCase();
+                    const isEponOnly = ponTypesUpper.includes('EPON') && !ponTypesUpper.includes('GPON');
+                    const isDualPon = ponTypesUpper.includes('EPON') && ponTypesUpper.includes('GPON');
+                    const makePorts = (slot: number, isEp: boolean, offset: number) =>
+                      Array.from({ length: 16 }, (_, idx) => ({
+                        id: nextId * 1000 + offset + idx + 1,
+                        olt_id: nextId,
+                        rack: 1,
+                        shelf: slot,
+                        slot,
+                        port_number: idx + 1,
+                        interface_name: `${isEp ? 'epon-olt_' : 'gpon-olt_'}1/${slot}/${idx + 1}`,
+                        board_model: isEp ? 'ETGH' : 'GTGH',
+                        description: `${isEp ? 'EPON' : 'PON'} 1/${slot}/${idx + 1}`,
+                        admin_state: 'ENABLED' as const,
+                        oper_status: 'Up' as const,
+                        online_onus: 0,
+                        total_onus: 0,
+                        avg_signal_dbm: null,
+                        tx_power_dbm: 10.5,
+                        max_onu_capacity: isEp ? 64 : 128,
+                      }));
+                    return isDualPon
+                      ? [...makePorts(2, true, 200), ...makePorts(3, false, 300)]
+                      : makePorts(3, isEponOnly, 300);
+                  })(),
                 ],
                 vlans: [
                   ...prev.vlans,
@@ -12356,7 +12400,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               );
               const allPonPorts = (oltGraphsData?.ponPorts || []).filter(
                 (p) =>
-                  /^gpon-olt_/i.test(String(p.interfaceName || '').trim()) &&
+                  /^(?:gpon|epon)-olt_/i.test(String(p.interfaceName || '').trim()) &&
                   (graphsShowAllPon ? true : p.activeOnus > 0 || p.totalOnus > 0)
               );
 
