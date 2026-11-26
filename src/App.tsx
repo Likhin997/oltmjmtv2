@@ -3738,7 +3738,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       const data = await resp.json();
       const elapsedMs = Date.now() - startMs;
 
-      if (data.ok || data.reachable) {
+      if (data.ok) {
         const cleanOutput = (data.output || '[OK - Executed on OLT]').trim();
         setDb((prev) => ({
           ...prev,
@@ -8134,79 +8134,142 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 `Create LAG ${newUplink.name}`
               );
             }}
-            onUpdatePonPort={(portNumber, updated, cliScript) => {
+            onUpdatePonPort={async (ponPort, updated, cliScript) => {
               const logId = Date.now();
+              const targetIf = ponPort.interface_name;
+              const slotNum = ponPort.slot || Number(targetIf.split('/')[1]) || 3;
+              const portNumber = ponPort.port_number;
+
+              setDb((prev) => ({
+                ...prev,
+                provisioning_logs: [
+                  {
+                    id: logId,
+                    olt_id: selectedOlt.id,
+                    onu_id: null,
+                    serial_number: 'OLT-PON',
+                    action_type: 'RESYNC_CONFIG',
+                    interface_target: targetIf,
+                    summary_text: `Updating PON port ${targetIf}`,
+                    cli_script: cliScript,
+                    olt_response: '[Executing on OLT via Telnet...]',
+                    execution_status: 'SUCCESS',
+                    executed_by: currentUser?.username || 'likhin',
+                    duration_ms: 0,
+                    created_at: 'Just now',
+                  },
+                  ...prev.provisioning_logs,
+                ],
+              }));
+              showToast(`Mengeksekusi konfigurasi Port GPON ${targetIf} ke OLT...`);
+
+              const execRes = await executeOltCliLive(
+                selectedOlt.id,
+                cliScript,
+                logId,
+                `Update PON ${targetIf}`
+              );
+
+              if (!execRes.ok) {
+                showToast(
+                  `✗ Gagal mengubah ${targetIf} di OLT: ${execRes.error || 'Periksa koneksi/hak akses Telnet OLT'}`
+                );
+                return;
+              }
+
+              // Verifikasi langsung output `show running-config interface gpon-olt_1/X/Y` dari OLT!
+              const verifyBlockRegex = new RegExp(
+                `interface\\s+${targetIf.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([\\s\\S]*?)(?=^\\s*!\\s*$|^\\s*end\\s*$|$)`,
+                'gim'
+              );
+              const verifyMatches = Array.from(execRes.output.matchAll(verifyBlockRegex));
+              const lastVerifyBody =
+                verifyMatches.length > 0
+                  ? verifyMatches[verifyMatches.length - 1][1]
+                  : '';
+              const stillShutdownOnOlt =
+                Boolean(lastVerifyBody) &&
+                /^\s*shutdown\b/im.test(lastVerifyBody) &&
+                !/^\s*no\s+shutdown\b/im.test(lastVerifyBody);
+              const hasZteCliError = /%Error|%Code|Invalid\s+input|Command\s+cannot/i.test(
+                execRes.output
+              );
+
+              if (updated.admin_state === 'ENABLED' && stillShutdownOnOlt) {
+                showToast(
+                  `⚠ OLT masih menampilkan 'shutdown' pada ${targetIf}. Cek level privilege user OLT atau output CLI di Log.`
+                );
+              } else if (hasZteCliError) {
+                showToast(
+                  `⚠ OLT mengembalikan peringatan CLI pada ${targetIf} — periksa tab Logs.`
+                );
+              }
+
+              const verifiedAdminState: 'ENABLED' | 'DISABLED' = lastVerifyBody
+                ? stillShutdownOnOlt
+                  ? 'DISABLED'
+                  : 'ENABLED'
+                : updated.admin_state || ponPort.admin_state;
+              const verifiedOperStatus: 'Up' | 'Down' =
+                verifiedAdminState === 'DISABLED'
+                  ? 'Down'
+                  : updated.oper_status || 'Up';
+
               setDb((prev) => {
                 const exists = prev.pon_ports.some(
-                  (p) => p.olt_id === selectedOlt.id && p.port_number === portNumber
+                  (p) =>
+                    p.olt_id === selectedOlt.id &&
+                    (p.interface_name.toLowerCase() === targetIf.toLowerCase() ||
+                      (p.slot === slotNum && p.port_number === portNumber))
                 );
                 const nextPonPorts = exists
                   ? prev.pon_ports.map((p) =>
-                      p.olt_id === selectedOlt.id && p.port_number === portNumber
-                        ? { ...p, ...updated }
+                      p.olt_id === selectedOlt.id &&
+                      (p.interface_name.toLowerCase() === targetIf.toLowerCase() ||
+                        (p.slot === slotNum && p.port_number === portNumber))
+                        ? {
+                            ...p,
+                            ...updated,
+                            slot: slotNum,
+                            interface_name: targetIf,
+                            admin_state: verifiedAdminState,
+                            oper_status: verifiedOperStatus,
+                          }
                         : p
                     )
                   : [
                       ...prev.pon_ports,
                       {
-                        id: Date.now() + 1,
+                        ...ponPort,
+                        ...updated,
+                        id: ponPort.id || Date.now() + 1,
                         olt_id: selectedOlt.id,
-                        rack: 1,
-                        shelf: 3,
-                        slot: 3,
+                        slot: slotNum,
                         port_number: portNumber,
-                        interface_name: `gpon-olt_1/3/${portNumber}`,
-                        board_model: 'GTGH',
-                        description: updated.description || '',
-                        admin_state: updated.admin_state || 'ENABLED',
-                        oper_status: updated.oper_status || 'Up',
-                        online_onus: 0,
-                        total_onus: 0,
-                        avg_signal_dbm: null,
-                        tx_power_dbm: 10.52,
-                        max_onu_capacity: updated.max_onu_capacity || 128,
+                        interface_name: targetIf,
+                        admin_state: verifiedAdminState,
+                        oper_status: verifiedOperStatus,
                       },
                     ];
                 return {
                   ...prev,
                   pon_ports: nextPonPorts,
-                  provisioning_logs: [
-                    {
-                      id: logId,
-                      olt_id: selectedOlt.id,
-                      onu_id: null,
-                      serial_number: 'OLT-PON',
-                      action_type: 'RESYNC_CONFIG',
-                      interface_target: `gpon-olt_1/3/${portNumber}`,
-                      summary_text: `Updated PON port gpon-olt_1/3/${portNumber}`,
-                      cli_script: cliScript,
-                      olt_response: '[Executing on OLT via Telnet...]',
-                      execution_status: 'SUCCESS',
-                      executed_by: 'likhin',
-                      duration_ms: 0,
-                      created_at: 'Just now',
-                    },
-                    ...prev.provisioning_logs,
-                  ],
                 };
               });
-              showToast(`Mengeksekusi konfigurasi Port GPON 1/3/${portNumber} ke OLT...`);
-              void executeOltCliLive(
-                selectedOlt.id,
-                cliScript,
-                logId,
-                `Update PON gpon-olt_1/3/${portNumber}`
-              );
             }}
-            onEnableAllPonPorts={() => {
+            onEnableAllPonPorts={async (targetPorts) => {
+              if (!targetPorts || targetPorts.length === 0) return;
               const logId = Date.now();
+              const targetSummary = Array.from(
+                new Set(targetPorts.map((p) => `Slot ${p.slot}`))
+              ).join(', ');
               const enableAllCli = [
                 'configure terminal',
-                ...Array.from({ length: 16 }, (_, idx) =>
+                ...targetPorts.map((p) =>
                   [
-                    `interface gpon-olt_1/3/${idx + 1}`,
+                    `interface ${p.interface_name}`,
                     '  no shutdown',
-                    '  uncfg-onu-display-info model sn pw',
+                    '  linktrap enable',
                     'exit',
                   ].join('\n')
                 ),
@@ -8216,15 +8279,6 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
 
               setDb((prev) => ({
                 ...prev,
-                pon_ports: prev.pon_ports.map((p) =>
-                  p.olt_id === selectedOlt.id
-                    ? {
-                        ...p,
-                        admin_state: 'ENABLED',
-                        oper_status: 'Up',
-                      }
-                    : p
-                ),
                 provisioning_logs: [
                   {
                     id: logId,
@@ -8232,25 +8286,65 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     onu_id: null,
                     serial_number: 'OLT-PON-ALL',
                     action_type: 'RESYNC_CONFIG',
-                    interface_target: 'gpon-olt_1/3/1..16',
-                    summary_text: 'Enabled all 16 GPON ports on Slot 3 GTGH',
+                    interface_target: `${targetPorts[0].interface_name}..${targetPorts[targetPorts.length - 1].interface_name}`,
+                    summary_text: `Enabling ${targetPorts.length} GPON ports (${targetSummary})`,
                     cli_script: enableAllCli,
                     olt_response: '[Executing on OLT via Telnet...]',
                     execution_status: 'SUCCESS',
-                    executed_by: 'likhin',
+                    executed_by: currentUser?.username || 'likhin',
                     duration_ms: 0,
                     created_at: 'Just now',
                   },
                   ...prev.provisioning_logs,
                 ],
               }));
-              showToast('Mengeksekusi no shutdown pada seluruh 16 port GPON ke OLT...');
-              void executeOltCliLive(
+              showToast(
+                `Mengeksekusi no shutdown + linktrap enable pada ${targetPorts.length} port GPON (${targetSummary}) ke OLT...`
+              );
+              const execRes = await executeOltCliLive(
                 selectedOlt.id,
                 enableAllCli,
                 logId,
-                'Enable All PON Ports (1/3/1..16)'
+                `Enable All PON Ports (${targetSummary})`
               );
+              if (!execRes.ok) {
+                showToast(
+                  `✗ Gagal enable PON ports di OLT: ${execRes.error || 'Koneksi Telnet gagal'}`
+                );
+                return;
+              }
+              const targetIfSet = new Set(
+                targetPorts.map((p) => p.interface_name.toLowerCase())
+              );
+              setDb((prev) => {
+                const existingIfs = new Set(
+                  prev.pon_ports
+                    .filter((p) => p.olt_id === selectedOlt.id)
+                    .map((p) => p.interface_name.toLowerCase())
+                );
+                const updatedExisting = prev.pon_ports.map((p) =>
+                  p.olt_id === selectedOlt.id &&
+                  targetIfSet.has(p.interface_name.toLowerCase())
+                    ? {
+                        ...p,
+                        admin_state: 'ENABLED' as const,
+                        oper_status: 'Up' as const,
+                      }
+                    : p
+                );
+                const newlyAdded = targetPorts
+                  .filter((tp) => !existingIfs.has(tp.interface_name.toLowerCase()))
+                  .map((tp) => ({
+                    ...tp,
+                    olt_id: selectedOlt.id,
+                    admin_state: 'ENABLED' as const,
+                    oper_status: 'Up' as const,
+                  }));
+                return {
+                  ...prev,
+                  pon_ports: [...updatedExisting, ...newlyAdded],
+                };
+              });
             }}
             onRefreshOltCards={async () => {
               const nowStr = formatJakartaDateTime();

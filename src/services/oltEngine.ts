@@ -2118,6 +2118,14 @@ export interface ParsedRunningConfigSummary {
     speed: string;
     adminState: 'Enabled' | 'Disabled';
   }[];
+  ponPorts?: {
+    rack: number;
+    slot: number;
+    port: number;
+    interfaceName: string;
+    isShutdown: boolean;
+    description: string;
+  }[];
   onus: ParsedRunningConfigOnu[];
 }
 
@@ -2134,7 +2142,15 @@ export function parseZteCardOutput(rawText: string): ParsedOltCard[] {
       slot,
       type: ctype,
       realType: ctype,
-      ports: ctype.startsWith('GTG') ? 16 : ctype.startsWith('GTXO') ? 8 : ctype.startsWith('HUV') ? 4 : null,
+      ports: ctype.startsWith('GTGO')
+        ? 8
+        : ctype.startsWith('GTG') || ctype.startsWith('GFGH')
+          ? 16
+          : ctype.startsWith('GTXO') || ctype.startsWith('GFGL')
+            ? 8
+            : ctype.startsWith('HUV') || ctype.startsWith('HUQ')
+              ? 4
+              : null,
       swVersion: 'V2.1.0',
       status: 'Online',
       role: 'Main',
@@ -2192,6 +2208,17 @@ export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConf
   const rawConfig = cleanZteCliText(rawInputConfig);
   const vlansMap = new Map<number, string>();
   const uplinks: ParsedRunningConfigSummary['uplinks'] = [];
+  const ponPortsMap = new Map<
+    string,
+    {
+      rack: number;
+      slot: number;
+      port: number;
+      interfaceName: string;
+      isShutdown: boolean;
+      description: string;
+    }
+  >();
   const onuMap = new Map<string, ParsedRunningConfigOnu>();
   const tcontProfiles: ParsedRunningConfigSummary['tcontProfiles'] = [];
   const trafficProfiles: ParsedRunningConfigSummary['trafficProfiles'] = [];
@@ -2258,15 +2285,28 @@ export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConf
     });
   }
 
-  // 3. Parse `interface gpon-olt_1/x/y` for ONU registrations
+  // 3. Parse `interface gpon-olt_1/x/y` for ONU registrations & port admin state (`shutdown` / `description`)
   // Note: Only terminate on top-level block boundaries (`!`, `end`, `interface gpon-...`, `pon-onu-mng`)
   const oltBlockRegex =
     /interface\s+gpon-olt_(\d+)\/(\d+)\/(\d+)([\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|$)/gim;
   let ob: RegExpExecArray | null;
   while ((ob = oltBlockRegex.exec(rawConfig)) !== null) {
+    const rack = parseInt(ob[1], 10);
     const board = parseInt(ob[2], 10);
     const port = parseInt(ob[3], 10);
     const body = ob[4];
+    const interfaceName = `gpon-olt_${rack}/${board}/${port}`;
+    const isShutdown =
+      /^\s*shutdown\b/im.test(body) && !/^\s*no\s+shutdown\b/im.test(body);
+    const descM = body.match(/^\s*description\s+([^\r\n]+)/im);
+    ponPortsMap.set(interfaceName, {
+      rack,
+      slot: board,
+      port,
+      interfaceName,
+      isShutdown,
+      description: descM ? descM[1].trim().replace(/^["']|["']$/g, '') : '',
+    });
     const onuLineRegex =
       /^\s*onu\s+(\d+)\s+type\s+(\S+)\s+(?:sn|mac)\s+([A-Za-z0-9.\-:]+)/gim;
     let ol: RegExpExecArray | null;
@@ -2550,6 +2590,9 @@ export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConf
     tcontProfiles,
     trafficProfiles,
     uplinks,
+    ponPorts: Array.from(ponPortsMap.values()).sort(
+      (a, b) => a.slot - b.slot || a.port - b.port
+    ),
     onus: Array.from(onuMap.values()),
   };
 }

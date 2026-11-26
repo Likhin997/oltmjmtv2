@@ -78,11 +78,11 @@ interface OltDetailViewProps {
   ) => void;
   onCreateLagUplink: (newUplink: Omit<UplinkPortRecord, 'id'>, cliScript: string) => void;
   onUpdatePonPort: (
-    portNumber: number,
+    ponPort: PonPortRecord,
     updated: Partial<PonPortRecord>,
     cliScript: string
   ) => void;
-  onEnableAllPonPorts: () => void;
+  onEnableAllPonPorts: (targetPorts: PonPortRecord[]) => void;
   onRefreshOltCards: () => void;
   onRebootOltCard: (cardId: number) => void;
   onUpdateOltSettings: (oltId: number, updated: Partial<OltRecord>) => void;
@@ -310,36 +310,107 @@ Rack Shelf Slot CfgType RealType Port   HardVer SoftVer         Status
     (u) => u.olt_id === olt.id
   );
 
-  // Build 16 GPON ports for Slot 3 GTGH
-  const full16PonPorts: PonPortRecord[] = Array.from({ length: 16 }, (_, idx) => {
-    const portNum = idx + 1;
-    const existing = db.pon_ports.find(
-      (p) => p.olt_id === olt.id && p.port_number === portNum
-    );
-    if (existing) return existing;
+  // Build dynamic GPON slot groups across ALL detected GPON boards on this OLT (e.g. Slot 1, Slot 2, Slot 3...)
+  const gponSlotGroups: Array<{
+    slot: number;
+    boardModel: string;
+    ports: PonPortRecord[];
+  }> = (() => {
+    const oltPonPorts = db.pon_ports.filter((p) => p.olt_id === olt.id);
+    const slotMeta = new Map<number, { boardModel: string; portCount: number }>();
+
+    for (const c of oltCards) {
+      const ct = (c.real_type || c.type || '').toUpperCase();
+      const isPonCard =
+        /^(GTG|GTH|GFG|ETG|GPON|EPON|XPON)/i.test(ct) ||
+        ((c.ports || 0) >= 8 &&
+          c.slot <= 17 &&
+          !/^(SCX|SMX|PRW|HUV|HUQ|GUF|XUT|GUT)/i.test(ct));
+      if (isPonCard) {
+        const count =
+          c.ports && c.ports > 0 ? c.ports : ct.startsWith('GTGO') ? 8 : 16;
+        slotMeta.set(c.slot, { boardModel: ct || 'GTGH', portCount: count });
+      }
+    }
+
+    for (const p of oltPonPorts) {
+      const slotNum = p.slot || Number(p.interface_name.split('/')[1]) || 3;
+      const existing = slotMeta.get(slotNum);
+      if (!existing) {
+        slotMeta.set(slotNum, {
+          boardModel: p.board_model || 'GTGH',
+          portCount: Math.max(p.port_number, p.port_number > 8 ? 16 : 8),
+        });
+      } else if (p.port_number > existing.portCount) {
+        existing.portCount = p.port_number > 8 ? 16 : p.port_number;
+      }
+    }
+
+    if (slotMeta.size === 0) {
+      slotMeta.set(3, { boardModel: 'GTGH', portCount: 16 });
+    }
+
     const txValues = [
       10.548, 11.026, 10.539, 10.178, 10.17, 10.713, 10.057, 10.659, 10.549,
       10.043, 10.412, 10.388, 10.601, 10.215, 10.49, 10.33,
     ];
-    return {
-      id: 100 + portNum,
-      olt_id: olt.id,
-      rack: 1,
-      shelf: 3,
-      slot: 3,
-      port_number: portNum,
-      interface_name: `gpon-olt_1/3/${portNum}`,
-      board_model: 'GTGH',
-      description: '',
-      admin_state: 'ENABLED',
-      oper_status: 'Down',
-      online_onus: 0,
-      total_onus: 0,
-      avg_signal_dbm: null,
-      tx_power_dbm: txValues[idx] || 10.5,
-      max_onu_capacity: 128,
-    };
-  });
+
+    return Array.from(slotMeta.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([slotNum, meta]) => {
+        const ports: PonPortRecord[] = Array.from(
+          { length: meta.portCount },
+          (_, idx) => {
+            const portNum = idx + 1;
+            const ifName = `gpon-olt_1/${slotNum}/${portNum}`;
+            const existing = oltPonPorts.find(
+              (p) =>
+                p.interface_name.toLowerCase() === ifName.toLowerCase() ||
+                (p.slot === slotNum && p.port_number === portNum)
+            );
+            if (existing) {
+              return {
+                ...existing,
+                slot: slotNum,
+                interface_name: existing.interface_name || ifName,
+                board_model: existing.board_model || meta.boardModel,
+              };
+            }
+            return {
+              id: olt.id * 10000 + slotNum * 100 + portNum,
+              olt_id: olt.id,
+              rack: 1,
+              shelf: 1,
+              slot: slotNum,
+              port_number: portNum,
+              interface_name: ifName,
+              board_model: meta.boardModel,
+              description: '',
+              admin_state: 'ENABLED',
+              oper_status: 'Down',
+              online_onus: 0,
+              total_onus: 0,
+              avg_signal_dbm: null,
+              tx_power_dbm: txValues[idx % txValues.length] || 10.5,
+              max_onu_capacity: 128,
+            };
+          }
+        );
+        return {
+          slot: slotNum,
+          boardModel: meta.boardModel,
+          ports,
+        };
+      });
+  })();
+
+  const filteredGponSlotGroups =
+    slotFilter === 'Any'
+      ? gponSlotGroups
+      : gponSlotGroups.filter((g) => String(g.slot) === slotFilter);
+  const visiblePonPorts: PonPortRecord[] = filteredGponSlotGroups.flatMap(
+    (g) => g.ports
+  );
 
   // Helper to parse which VLAN IDs are currently tagged on an UplinkPortRecord
   const parseTaggedVlanNumbers = (taggedStr: string): number[] => {
@@ -1349,12 +1420,18 @@ ${oltVlans
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() =>
+              onClick={() => {
+                if (onSyncOltLive) {
+                  void onSyncOltLive(olt.id);
+                }
+                const slotList = filteredGponSlotGroups
+                  .map((g) => `gpon-olt_1/${g.slot}/1..${g.ports.length}`)
+                  .join(', ');
                 setLastCliBanner({
-                  title: `Refreshed 16 GPON Ports Info on Slot 3 (GTGH)`,
-                  cli: `${olt.name}# show interface gpon-olt_1/3/1..16\nPolled optical TX power, active ONUs, and average 1310nm RX attenuation.`,
-                })
-              }
+                  title: `Refreshing ${visiblePonPorts.length} GPON Ports Info (${slotList})`,
+                  cli: `${olt.name}# show running-config / show card\nPolling real admin state (shutdown / no shutdown), optical TX power & active ONUs.`,
+                });
+              }}
               className="rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
             >
               Refresh PON ports info
@@ -1364,10 +1441,19 @@ ${oltVlans
                 <button
                   type="button"
                   onClick={() => {
-                    onEnableAllPonPorts();
+                    onEnableAllPonPorts(visiblePonPorts);
+                    const cliPreview = [
+                      'configure terminal',
+                      ...visiblePonPorts.map(
+                        (p) =>
+                          `interface ${p.interface_name}\n  no shutdown\n  linktrap enable\nexit`
+                      ),
+                      'end',
+                      'write',
+                    ].join('\n');
                     setLastCliBanner({
-                      title: `Enabled All 16 GPON Ports on Slot 3 (GTGH)`,
-                      cli: `configure terminal\ninterface range gpon-olt_1/3/1-16\n  no shutdown\nexit\nend\nwrite`,
+                      title: `Enabling ${visiblePonPorts.length} GPON Ports on ${olt.name}`,
+                      cli: cliPreview,
                     });
                   }}
                   className="rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
@@ -1376,12 +1462,15 @@ ${oltVlans
                 </button>
                 <button
                   type="button"
-                  onClick={() =>
+                  onClick={() => {
+                    const slotRanges = filteredGponSlotGroups
+                      .map((g) => `gpon-olt_1/${g.slot}/1-${g.ports.length}`)
+                      .join(', ');
                     setLastCliBanner({
                       title: `Batch Reboot All ONUs Executed on ${olt.name}`,
-                      cli: `configure terminal\npon-onu-mng gpon-olt_1/3/1-16\n  reboot all-onu\nexit\nend`,
-                    })
-                  }
+                      cli: `configure terminal\npon-onu-mng ${slotRanges}\n  reboot all-onu\nexit\nend`,
+                    });
+                  }}
                   className="rounded bg-[#f0ad4e] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#ec971f]"
                 >
                   Reboot all ONUs
@@ -1392,9 +1481,12 @@ ${oltVlans
               type="button"
               onClick={() => {
                 setRogueStatus('No rogue ONU detected (Clean)');
+                const slotRanges = filteredGponSlotGroups
+                  .map((g) => `gpon-olt_1/${g.slot}/1-${g.ports.length}`)
+                  .join(', ');
                 setLastCliBanner({
                   title: `Rogue ONU Laser Diagnostic Completed`,
-                  cli: `${olt.name}# show gpon rogue-onu gpon-olt_1/3/1-16\nResult: 0 continuous-mode rogue lasers detected across 16 PON ports.`,
+                  cli: `${olt.name}# show gpon rogue-onu ${slotRanges}\nResult: 0 continuous-mode rogue lasers detected across ${visiblePonPorts.length} PON ports.`,
                 });
               }}
               className="flex items-center gap-1 rounded bg-[#d9534f] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#c9302c]"
@@ -1412,187 +1504,196 @@ ${oltVlans
               className="rounded border border-[#284870] bg-[#10233a] px-3 py-1.5 text-xs text-white"
             >
               <option value="Any">Any</option>
-              <option value="3">Slot 3 (GTGH)</option>
+              {gponSlotGroups.map((g) => (
+                <option key={g.slot} value={String(g.slot)}>
+                  Slot {g.slot} ({g.boardModel})
+                </option>
+              ))}
             </select>
             <span className="text-slate-300">All loaded.</span>
           </div>
 
-          <div className="flex flex-wrap items-center justify-between pt-1">
-            <h3 className="text-base font-bold text-white">
-              OLT slot 3, board type: GTGH
-            </h3>
-            {!isReadOnly && (
-              <div className="flex items-center gap-4 text-xs text-sky-400">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const firstPort = full16PonPorts[0];
-                    setConfiguringPonPort(firstPort);
-                    setPonEditDesc(firstPort.description);
-                    setPonEditAdmin(firstPort.admin_state);
-                    setPonEditOper(firstPort.oper_status);
-                    setPonEditMaxOnu(firstPort.max_onu_capacity);
-                  }}
-                  className="hover:underline"
-                >
-                  ✎ Configure Max ONUs per PON
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setLastCliBanner({
-                      title: `Rebooted All ONUs on Slot 3 (GTGH)`,
-                      cli: `configure terminal\ninterface range gpon-olt_1/3/1-16\n  onu reboot all\nexit\nend`,
-                    })
-                  }
-                  className="hover:underline"
-                >
-                  ↻ Reboot all ONUs on slot 3
-                </button>
+          {filteredGponSlotGroups.map((group) => (
+            <div key={group.slot} className="space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between pt-1">
+                <h3 className="text-base font-bold text-white">
+                  OLT slot {group.slot}, board type: {group.boardModel}
+                </h3>
+                {!isReadOnly && (
+                  <div className="flex items-center gap-4 text-xs text-sky-400">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const firstPort = group.ports[0];
+                        if (!firstPort) return;
+                        setConfiguringPonPort(firstPort);
+                        setPonEditDesc(firstPort.description);
+                        setPonEditAdmin(firstPort.admin_state);
+                        setPonEditOper(firstPort.oper_status);
+                        setPonEditMaxOnu(firstPort.max_onu_capacity);
+                      }}
+                      className="hover:underline"
+                    >
+                      ✎ Configure Max ONUs per PON
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setLastCliBanner({
+                          title: `Rebooted All ONUs on Slot ${group.slot} (${group.boardModel})`,
+                          cli: `configure terminal\ninterface range gpon-olt_1/${group.slot}/1-${group.ports.length}\n  onu reboot all\nexit\nend`,
+                        })
+                      }
+                      className="hover:underline"
+                    >
+                      ↻ Reboot all ONUs on slot {group.slot}
+                    </button>
+                  </div>
+                )}
               </div>
-            )}
-          </div>
 
-          <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
-            <table className="w-full text-left text-xs">
-              <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
-                <tr>
-                  <th className="px-3 py-2.5">Port</th>
-                  <th className="px-3 py-2.5">Type</th>
-                  <th className="px-3 py-2.5">Admin state</th>
-                  <th className="px-3 py-2.5">Status</th>
-                  <th className="px-3 py-2.5">ONUs</th>
-                  <th className="px-3 py-2.5">Load</th>
-                  <th className="px-3 py-2.5">Average signal</th>
-                  <th className="px-3 py-2.5">Description</th>
-                  <th className="px-3 py-2.5">Properties</th>
-                  <th className="px-3 py-2.5">Tx power dBm</th>
-                  <th className="px-3 py-2.5">Action</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#1e3a5f]/70">
-                {full16PonPorts.map((p) => {
-                  const pct = Math.round(
-                    (p.total_onus / (p.max_onu_capacity || 128)) * 100
-                  );
-                  return (
-                    <tr key={p.port_number} className="hover:bg-[#132842]/50">
-                      <td className="px-3 py-2.5 font-mono text-white">
-                        {p.port_number}
-                      </td>
-                      <td className="px-3 py-2.5 text-white">GPON</td>
-                      <td className="px-3 py-2.5 text-white">
-                        {p.admin_state === 'ENABLED' ? 'Enabled' : 'Disabled'}
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <span
-                          className={
-                            p.oper_status === 'Up'
-                              ? 'font-semibold text-emerald-400'
-                              : 'font-semibold text-red-400'
-                          }
-                        >
-                          {p.oper_status}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2.5 text-sky-400">
-                        <div>Online: {p.online_onus}</div>
-                        <div>Total: {p.total_onus}</div>
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <div className="relative h-4 w-28 overflow-hidden rounded bg-slate-700 text-center text-[10px] font-bold leading-4 text-white">
-                          <div
-                            className="absolute inset-y-0 left-0 bg-emerald-600"
-                            style={{
-                              width: `${Math.max(pct, p.total_onus > 0 ? 8 : 0)}%`,
-                            }}
-                          />
-                          <span className="relative z-10">
-                            {p.total_onus} / {p.max_onu_capacity || 128} ({pct}%)
-                          </span>
-                        </div>
-                      </td>
-                      <td className="px-3 py-2.5 font-mono">
-                        {p.avg_signal_dbm !== null ? (
-                          <span className="flex items-center gap-1.5 text-sky-400">
-                            {p.avg_signal_dbm}
-                            <span className="inline-flex items-end gap-0.5">
-                              <span className="h-1.5 w-0.5 bg-emerald-400" />
-                              <span className="h-2.5 w-0.5 bg-emerald-400" />
-                              <span className="h-3.5 w-0.5 bg-emerald-400" />
-                            </span>
-                          </span>
-                        ) : (
-                          ''
-                        )}
-                      </td>
-                      <td className="px-3 py-2.5 font-medium text-slate-200">
-                        {p.description}
-                      </td>
-                      <td className="px-3 py-2.5 text-slate-300">
-                        <div>
-                          Range: <strong className="text-white">0 - 20000 m</strong>
-                        </div>
-                        <div>
-                          Rogue ONU detect:{' '}
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setRogueStatus('No rogue ONU detected (Clean)')
-                            }
-                            className="text-sky-400 underline"
-                          >
-                            {rogueStatus}
-                          </button>
-                        </div>
-                      </td>
-                      <td className="px-3 py-2.5 font-mono text-white">
-                        {p.tx_power_dbm}
-                      </td>
-                      <td className="space-y-1 px-3 py-2.5 text-sky-400">
-                        {!isReadOnly && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setConfiguringPonPort(p);
-                              setPonEditDesc(p.description);
-                              setPonEditAdmin(p.admin_state);
-                              setPonEditOper(p.oper_status);
-                              setPonEditMaxOnu(p.max_onu_capacity || 128);
-                            }}
-                            className="block hover:underline"
-                          >
-                            ⚙ Configure
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => setTrafficPonPort(p)}
-                          className="block hover:underline"
-                        >
-                          📈 Traffic
-                        </button>
-                        {!isReadOnly && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setLastCliBanner({
-                                title: `Rebooted All ONUs on PON Port ${p.interface_name}`,
-                                cli: `configure terminal\ninterface ${p.interface_name}\n  onu reboot all\nexit\nend`,
-                              })
-                            }
-                            className="block hover:underline"
-                          >
-                            ↻ Reboot ONUs
-                          </button>
-                        )}
-                      </td>
+              <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
+                    <tr>
+                      <th className="px-3 py-2.5">Port</th>
+                      <th className="px-3 py-2.5">Type</th>
+                      <th className="px-3 py-2.5">Admin state</th>
+                      <th className="px-3 py-2.5">Status</th>
+                      <th className="px-3 py-2.5">ONUs</th>
+                      <th className="px-3 py-2.5">Load</th>
+                      <th className="px-3 py-2.5">Average signal</th>
+                      <th className="px-3 py-2.5">Description</th>
+                      <th className="px-3 py-2.5">Properties</th>
+                      <th className="px-3 py-2.5">Tx power dBm</th>
+                      <th className="px-3 py-2.5">Action</th>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                  </thead>
+                  <tbody className="divide-y divide-[#1e3a5f]/70">
+                    {group.ports.map((p) => {
+                      const pct = Math.round(
+                        (p.total_onus / (p.max_onu_capacity || 128)) * 100
+                      );
+                      return (
+                        <tr key={p.interface_name} className="hover:bg-[#132842]/50">
+                          <td className="px-3 py-2.5 font-mono text-white">
+                            {p.port_number}
+                          </td>
+                          <td className="px-3 py-2.5 text-white">GPON</td>
+                          <td className="px-3 py-2.5 text-white">
+                            {p.admin_state === 'ENABLED' ? 'Enabled' : 'Disabled'}
+                          </td>
+                          <td className="px-3 py-2.5">
+                            <span
+                              className={
+                                p.oper_status === 'Up'
+                                  ? 'font-semibold text-emerald-400'
+                                  : 'font-semibold text-red-400'
+                              }
+                            >
+                              {p.oper_status}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2.5 text-sky-400">
+                            <div>Online: {p.online_onus}</div>
+                            <div>Total: {p.total_onus}</div>
+                          </td>
+                          <td className="px-3 py-2.5">
+                            <div className="relative h-4 w-28 overflow-hidden rounded bg-slate-700 text-center text-[10px] font-bold leading-4 text-white">
+                              <div
+                                className="absolute inset-y-0 left-0 bg-emerald-600"
+                                style={{
+                                  width: `${Math.max(pct, p.total_onus > 0 ? 8 : 0)}%`,
+                                }}
+                              />
+                              <span className="relative z-10">
+                                {p.total_onus} / {p.max_onu_capacity || 128} ({pct}%)
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-3 py-2.5 font-mono">
+                            {p.avg_signal_dbm !== null ? (
+                              <span className="flex items-center gap-1.5 text-sky-400">
+                                {p.avg_signal_dbm}
+                                <span className="inline-flex items-end gap-0.5">
+                                  <span className="h-1.5 w-0.5 bg-emerald-400" />
+                                  <span className="h-2.5 w-0.5 bg-emerald-400" />
+                                  <span className="h-3.5 w-0.5 bg-emerald-400" />
+                                </span>
+                              </span>
+                            ) : (
+                              ''
+                            )}
+                          </td>
+                          <td className="px-3 py-2.5 font-medium text-slate-200">
+                            {p.description}
+                          </td>
+                          <td className="px-3 py-2.5 text-slate-300">
+                            <div>
+                              Range: <strong className="text-white">0 - 20000 m</strong>
+                            </div>
+                            <div>
+                              Rogue ONU detect:{' '}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setRogueStatus('No rogue ONU detected (Clean)')
+                                }
+                                className="text-sky-400 underline"
+                              >
+                                {rogueStatus}
+                              </button>
+                            </div>
+                          </td>
+                          <td className="px-3 py-2.5 font-mono text-white">
+                            {p.tx_power_dbm}
+                          </td>
+                          <td className="space-y-1 px-3 py-2.5 text-sky-400">
+                            {!isReadOnly && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setConfiguringPonPort(p);
+                                  setPonEditDesc(p.description);
+                                  setPonEditAdmin(p.admin_state);
+                                  setPonEditOper(p.oper_status);
+                                  setPonEditMaxOnu(p.max_onu_capacity || 128);
+                                }}
+                                className="block hover:underline"
+                              >
+                                ⚙ Configure
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => setTrafficPonPort(p)}
+                              className="block hover:underline"
+                            >
+                              📈 Traffic
+                            </button>
+                            {!isReadOnly && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setLastCliBanner({
+                                    title: `Rebooted All ONUs on PON Port ${p.interface_name}`,
+                                    cli: `configure terminal\ninterface ${p.interface_name}\n  onu reboot all\nexit\nend`,
+                                  })
+                                }
+                                className="block hover:underline"
+                              >
+                                ↻ Reboot ONUs
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -2926,21 +3027,31 @@ ${oltVlans
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                const cli = `configure terminal\ninterface ${configuringPonPort.interface_name}\n  description "${ponEditDesc}"\n  ${
-                  ponEditAdmin === 'ENABLED' ? 'no shutdown' : 'shutdown'
-                }\n  onu-number-limit ${ponEditMaxOnu}\nexit\nend\nwrite`;
+                const cleanDesc = ponEditDesc.trim().replace(/["\r\n]/g, '');
+                const cliLines = [
+                  'configure terminal',
+                  `interface ${configuringPonPort.interface_name}`,
+                  ponEditAdmin === 'ENABLED' ? '  no shutdown' : '  shutdown',
+                  ponEditAdmin === 'ENABLED' ? '  linktrap enable' : '  linktrap disable',
+                  ...(cleanDesc ? [`  description ${cleanDesc}`] : []),
+                  'exit',
+                  'end',
+                  'write',
+                  `show running-config interface ${configuringPonPort.interface_name}`,
+                ];
+                const cli = cliLines.join('\n');
                 onUpdatePonPort(
-                  configuringPonPort.port_number,
+                  configuringPonPort,
                   {
-                    description: ponEditDesc,
+                    description: cleanDesc,
                     admin_state: ponEditAdmin,
-                    oper_status: ponEditOper,
+                    oper_status: ponEditAdmin === 'DISABLED' ? 'Down' : ponEditOper,
                     max_onu_capacity: ponEditMaxOnu,
                   },
                   cli
                 );
                 setLastCliBanner({
-                  title: `PON Port ${configuringPonPort.interface_name} Updated`,
+                  title: `PON Port ${configuringPonPort.interface_name} Pushing to OLT...`,
                   cli,
                 });
                 setConfiguringPonPort(null);

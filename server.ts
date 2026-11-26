@@ -3116,37 +3116,116 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
     });
   }
 
-  // 6. 16 PON Ports on Slot 3 GTGH (O(N) single-pass port grouping)
+  // 6. Dynamic PON Ports across ALL real GPON slots (from show card, running-config, and active ONUs)
   const otherPonPorts = state.pon_ports.filter((p) => p.olt_id !== oltId);
-  const configuredByPort = new Map<number, { total: number; online: number }>();
+  const prevPonByIf = new Map(
+    state.pon_ports
+      .filter((p) => p.olt_id === oltId)
+      .map((p) => [p.interface_name.toLowerCase(), p])
+  );
+  const parsedPonByIf = new Map(
+    (parsed.ponPorts || []).map((p) => [p.interfaceName.toLowerCase(), p])
+  );
+  const configuredBySlotPort = new Map<string, { total: number; online: number }>();
   for (const o of configuredOnus) {
-    const rec = configuredByPort.get(o.port) || { total: 0, online: 0 };
+    const spKey = `${o.board}:${o.port}`;
+    const rec = configuredBySlotPort.get(spKey) || { total: 0, online: 0 };
     rec.total += 1;
     if (o.phase_state === 'working') rec.online += 1;
-    configuredByPort.set(o.port, rec);
+    configuredBySlotPort.set(spKey, rec);
   }
-  const newPonPorts: PonPortRecord[] = Array.from({ length: 16 }, (_, idx) => {
-    const portNum = idx + 1;
-    const stats = configuredByPort.get(portNum) || { total: 0, online: 0 };
-    return {
-      id: oltId * 100 + portNum,
-      olt_id: oltId,
-      rack: 1,
-      shelf: 3,
-      slot: 3,
-      port_number: portNum,
-      interface_name: `gpon-olt_1/3/${portNum}`,
-      board_model: 'GTGH',
-      description: `PON 1/3/${portNum}`,
-      admin_state: 'ENABLED',
-      oper_status: 'Up',
-      online_onus: stats.online,
-      total_onus: stats.total,
-      avg_signal_dbm: stats.total > 0 ? -22.4 : null,
-      tx_power_dbm: 10.5,
-      max_onu_capacity: 128,
-    };
-  });
+
+  const slotMetaMap = new Map<number, { boardModel: string; portCount: number }>();
+  for (const c of newCards) {
+    const ct = (c.real_type || c.type || '').toUpperCase();
+    const isPonCard =
+      /^(GTG|GTH|GFG|ETG|GPON|EPON|XPON)/i.test(ct) ||
+      ((c.ports || 0) >= 8 && c.slot <= 17 && !/^(SCX|SMX|PRW|HUV|HUQ|GUF|XUT|GUT)/i.test(ct));
+    if (isPonCard) {
+      const count =
+        c.ports && c.ports > 0
+          ? c.ports
+          : ct.startsWith('GTGO')
+            ? 8
+            : 16;
+      slotMetaMap.set(c.slot, { boardModel: ct || 'GTGH', portCount: count });
+    }
+  }
+  for (const pp of parsed.ponPorts || []) {
+    const existing = slotMetaMap.get(pp.slot);
+    if (!existing) {
+      slotMetaMap.set(pp.slot, {
+        boardModel: 'GTGH',
+        portCount: Math.max(pp.port, pp.port > 8 ? 16 : 8),
+      });
+    } else if (pp.port > existing.portCount) {
+      existing.portCount = pp.port > 8 ? 16 : pp.port;
+    }
+  }
+  for (const o of configuredOnus) {
+    const existing = slotMetaMap.get(o.board);
+    if (!existing) {
+      slotMetaMap.set(o.board, {
+        boardModel: 'GTGH',
+        portCount: o.port > 8 ? 16 : 16,
+      });
+    } else if (o.port > existing.portCount) {
+      existing.portCount = 16;
+    }
+  }
+  if (slotMetaMap.size === 0) {
+    slotMetaMap.set(3, { boardModel: 'GTGH', portCount: 16 });
+  }
+
+  const newPonPorts: PonPortRecord[] = [];
+  const sortedSlots = Array.from(slotMetaMap.keys()).sort((a, b) => a - b);
+  for (const slotNum of sortedSlots) {
+    const meta = slotMetaMap.get(slotNum)!;
+    for (let portNum = 1; portNum <= meta.portCount; portNum++) {
+      const ifName = `gpon-olt_1/${slotNum}/${portNum}`;
+      const parsedPort = parsedPonByIf.get(ifName.toLowerCase());
+      const prevPort = prevPonByIf.get(ifName.toLowerCase());
+      const stats = configuredBySlotPort.get(`${slotNum}:${portNum}`) || {
+        total: 0,
+        online: 0,
+      };
+      const adminState: 'ENABLED' | 'DISABLED' = parsedPort
+        ? parsedPort.isShutdown
+          ? 'DISABLED'
+          : 'ENABLED'
+        : prevPort?.admin_state || 'ENABLED';
+      const operStatus: 'Up' | 'Down' =
+        adminState === 'DISABLED'
+          ? 'Down'
+          : stats.online > 0
+            ? 'Up'
+            : prevPort && prevPort.admin_state === 'ENABLED'
+              ? prevPort.oper_status
+              : 'Down';
+
+      newPonPorts.push({
+        id: prevPort?.id || oltId * 10000 + slotNum * 100 + portNum,
+        olt_id: oltId,
+        rack: parsedPort?.rack || 1,
+        shelf: 1,
+        slot: slotNum,
+        port_number: portNum,
+        interface_name: ifName,
+        board_model: meta.boardModel,
+        description:
+          parsedPort?.description ||
+          prevPort?.description ||
+          `PON 1/${slotNum}/${portNum}`,
+        admin_state: adminState,
+        oper_status: operStatus,
+        online_onus: stats.online,
+        total_onus: stats.total,
+        avg_signal_dbm: stats.total > 0 ? prevPort?.avg_signal_dbm ?? -22.4 : null,
+        tx_power_dbm: prevPort?.tx_power_dbm ?? 10.5,
+        max_onu_capacity: prevPort?.max_onu_capacity || 128,
+      });
+    }
+  }
 
   // 7. Update OLT last_polled_at & status
   const updatedOlts = state.olts.map((o) =>
