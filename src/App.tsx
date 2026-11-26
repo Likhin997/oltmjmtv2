@@ -8148,7 +8148,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               setDb((prev) => ({
                 ...prev,
                 uplink_ports: [
-                  ...prev.uplink_ports,
+                  ...prev.uplink_ports.filter(
+                    (u) =>
+                      !(
+                        u.olt_id === newUplink.olt_id &&
+                        u.name.trim().toLowerCase() === newUplink.name.trim().toLowerCase()
+                      )
+                  ),
                   { ...newUplink, id: Date.now() + 1 },
                 ],
                 provisioning_logs: [

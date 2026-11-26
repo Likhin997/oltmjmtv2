@@ -2938,26 +2938,98 @@ export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConf
   }
 
   // 6. Parse Uplink interfaces (`xgei_1/19/1`, `gei_1/19/3`, etc.)
+  // ZTE `show running-config` emits the same `interface xgei_1/19/1` block multiple times
+  // across modules (eth-switch, eth-port, igmp, qos, lacp, etc.). Merge all blocks per interface!
+  const uplinkMap = new Map<
+    string,
+    {
+      name: string;
+      pvidUntag: number;
+      hasPvid: boolean;
+      modeLabel: string;
+      taggedSet: Set<number>;
+      rawTagSpec: string | null;
+      speed: string;
+      adminState: 'Enabled' | 'Disabled';
+      hasExplicitNoShutdown: boolean;
+    }
+  >();
+
   const uplinkRegex =
-    /interface\s+((?:x?gei)_\d+\/\d+\/\d+)([\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+|$)/gim;
+    /^\s*interface\s+((?:x?gei)_\d+\/\d+\/\d+)\b([^\r\n]*\r?\n[\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+|$)/gim;
   let ub: RegExpExecArray | null;
   while ((ub = uplinkRegex.exec(rawConfig)) !== null) {
     const name = ub[1].trim();
-    const body = ub[2];
-    const pvidM = body.match(/switchport\s+default\s+vlan\s+(\d+)/);
-    const tagM = body.match(/switchport\s+vlan\s+([^\r\n]+?)\s+tag/);
-    const isShutdown = /^\s*shutdown\b/m.test(body) && !/^\s*no\s+shutdown\b/m.test(body);
-    if (tagM) {
-      for (const tv of expandVlanSpecToNumbers(tagM[1].trim())) {
+    const key = name.toLowerCase();
+    const body = ub[2] || '';
+    const pvidM = body.match(/switchport\s+default\s+vlan\s+(\d+)/i);
+    const modeM = body.match(/switchport\s+mode\s+(hybrid|trunk|access)/i);
+    const tagRegex = /switchport\s+vlan\s+([^\r\n]+?)\s+tag\b/gi;
+    const hasShutdown = /^\s*shutdown\b/im.test(body);
+    const hasNoShutdown = /^\s*no\s+shutdown\b/im.test(body);
+
+    let entry = uplinkMap.get(key);
+    if (!entry) {
+      entry = {
+        name,
+        pvidUntag: 1,
+        hasPvid: false,
+        modeLabel: 'Hybrid',
+        taggedSet: new Set<number>(),
+        rawTagSpec: null,
+        speed: key.startsWith('xgei') ? 'Forced 10G-FullD' : 'Auto',
+        adminState: 'Enabled',
+        hasExplicitNoShutdown: false,
+      };
+      uplinkMap.set(key, entry);
+    }
+
+    if (pvidM) {
+      entry.pvidUntag = parseInt(pvidM[1], 10);
+      entry.hasPvid = true;
+    }
+    if (modeM) {
+      const m = modeM[1].toLowerCase();
+      entry.modeLabel = m === 'trunk' ? 'Trunk' : m === 'access' ? 'Access' : 'Hybrid';
+    }
+    let tm: RegExpExecArray | null;
+    while ((tm = tagRegex.exec(body)) !== null) {
+      const rawSpec = tm[1].trim();
+      entry.rawTagSpec = entry.rawTagSpec ? `${entry.rawTagSpec},${rawSpec}` : rawSpec;
+      for (const tv of expandVlanSpecToNumbers(rawSpec)) {
+        entry.taggedSet.add(tv);
         if (!vlansMap.has(tv)) vlansMap.set(tv, `VLAN_${tv}`);
       }
     }
+    if (hasNoShutdown) {
+      entry.hasExplicitNoShutdown = true;
+      entry.adminState = 'Enabled';
+    } else if (hasShutdown && !entry.hasExplicitNoShutdown) {
+      entry.adminState = 'Disabled';
+    }
+  }
+
+  const parseIfTuple = (ifName: string): [number, number, number] => {
+    const m = ifName.match(/_(\d+)\/(\d+)\/(\d+)$/);
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [99, 99, 99];
+  };
+
+  for (const entry of Array.from(uplinkMap.values()).sort((a, b) => {
+    const [a1, a2, a3] = parseIfTuple(a.name);
+    const [b1, b2, b3] = parseIfTuple(b.name);
+    return a1 - b1 || a2 - b2 || a3 - b3 || a.name.localeCompare(b.name);
+  })) {
+    const sortedVlans = Array.from(entry.taggedSet).sort((a, b) => a - b);
+    const vlanDisplay =
+      sortedVlans.length > 0
+        ? sortedVlans.join(',')
+        : entry.rawTagSpec || 'none';
     uplinks.push({
-      name,
-      pvidUntag: pvidM ? parseInt(pvidM[1], 10) : 41,
-      taggedVlans: `Hybrid: ${tagM ? tagM[1].trim() : '102'}`,
-      speed: name.startsWith('xgei') ? 'Forced 10G-FullD' : 'Auto',
-      adminState: isShutdown ? 'Disabled' : 'Enabled',
+      name: entry.name,
+      pvidUntag: entry.hasPvid ? entry.pvidUntag : 1,
+      taggedVlans: `${entry.modeLabel}: ${vlanDisplay}`,
+      speed: entry.speed,
+      adminState: entry.adminState,
     });
   }
 

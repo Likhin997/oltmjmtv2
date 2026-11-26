@@ -98,6 +98,39 @@ function buildPonOltIf(
   };
 }
 
+function dedupeUplinkPorts(uplinks: UplinkPortRecord[] | undefined | null): UplinkPortRecord[] {
+  if (!Array.isArray(uplinks) || uplinks.length <= 1) {
+    return Array.isArray(uplinks) ? uplinks : [];
+  }
+  const byKey = new Map<string, UplinkPortRecord>();
+  const scoreUplink = (u: UplinkPortRecord): number => {
+    let score = 0;
+    if (u.description && u.description.trim().length > 0) score += 2;
+    if (u.tagged_vlans && !/^(?:Hybrid:\s*(?:102|none))?$/i.test(u.tagged_vlans.trim())) score += 3;
+    if (u.pvid_untag && u.pvid_untag !== 41 && u.pvid_untag !== 1) score += 1;
+    if (u.signal_dbm && u.signal_dbm.trim().length > 0) score += 1;
+    return score;
+  };
+  for (const item of uplinks) {
+    if (!item || !item.name) continue;
+    const key = `${item.olt_id}:${item.name.trim().toLowerCase()}`;
+    const prev = byKey.get(key);
+    if (!prev || scoreUplink(item) > scoreUplink(prev)) {
+      byKey.set(key, prev ? { ...prev, ...item, id: prev.id } : item);
+    }
+  }
+  const parseTuple = (ifName: string): [number, number, number] => {
+    const m = ifName.match(/_(\d+)\/(\d+)\/(\d+)$/);
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [99, 99, 99];
+  };
+  return Array.from(byKey.values()).sort((a, b) => {
+    if (a.olt_id !== b.olt_id) return a.olt_id - b.olt_id;
+    const [a1, a2, a3] = parseTuple(a.name);
+    const [b1, b2, b3] = parseTuple(b.name);
+    return a1 - b1 || a2 - b2 || a3 - b3 || a.name.localeCompare(b.name);
+  });
+}
+
 process.env.TZ = 'Asia/Jakarta';
 dotenv.config();
 
@@ -1433,6 +1466,7 @@ async function loadDatabaseState(
       if (res.rows.length > 0 && res.rows[0].json_payload) {
         const parsed = JSON.parse(res.rows[0].json_payload) as SmartOltDatabaseState;
         parsed.users = bootstrapAndHashUsers(parsed.users, tenantId);
+        parsed.uplink_ports = dedupeUplinkPorts(parsed.uplink_ports);
         // Reconcile zones, sectors, odbs, and ONUs from SQLite cache if SQLite has newer/more records
         if (sqliteState) {
           parsed.zones = mergeCollectionById(sqliteState.zones, parsed.zones);
@@ -1521,6 +1555,7 @@ async function loadDatabaseState(
 
   if (sqliteState) {
     sqliteState.users = bootstrapAndHashUsers(sqliteState.users, tenantId);
+    sqliteState.uplink_ports = dedupeUplinkPorts(sqliteState.uplink_ports);
     if (
       isRoot &&
       sqliteState.olts.length === 0 &&
@@ -1582,11 +1617,16 @@ async function saveDatabaseState(
   const storeKey = getStoreKeyForTenant(tenantId);
   const isRoot = tenantId === ROOT_TENANT_ID;
 
-  // Cap provisioning_logs to prevent unbounded growth at 10,000+ ONU scale
-  const boundedState: SmartOltDatabaseState =
-    state.provisioning_logs && state.provisioning_logs.length > 500
-      ? { ...state, provisioning_logs: state.provisioning_logs.slice(0, 500) }
-      : state;
+  // Cap provisioning_logs & enforce unique uplink ports per OLT
+  const dedupedUplinks = dedupeUplinkPorts(state.uplink_ports);
+  const boundedState: SmartOltDatabaseState = {
+    ...state,
+    uplink_ports: dedupedUplinks,
+    provisioning_logs:
+      state.provisioning_logs && state.provisioning_logs.length > 500
+        ? state.provisioning_logs.slice(0, 500)
+        : state.provisioning_logs,
+  };
 
   // Serialize ONCE (avoid double JSON.stringify + JSON.parse of 10,000+ ONUs)
   const payload = JSON.stringify(boundedState);
@@ -2959,32 +2999,44 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
     ...existingOltVlans.filter((v) => !newVlanIds.has(v.vlan_id)),
   ];
 
-  // 3. Uplink Ports
+  // 3. Uplink Ports (deduplicated by interface name per OLT, preserving existing id/description)
   const otherUplinks = state.uplink_ports.filter((u) => u.olt_id !== oltId);
+  const existingOltUplinks = dedupeUplinkPorts(
+    state.uplink_ports.filter((u) => u.olt_id === oltId)
+  );
+  const existingUplinkByName = new Map(
+    existingOltUplinks.map((u) => [u.name.trim().toLowerCase(), u])
+  );
   const newUplinks: UplinkPortRecord[] =
     parsed.uplinks.length > 0
-      ? parsed.uplinks.map((u, idx) => ({
-          id: oltId * 100 + idx + 1,
-          olt_id: oltId,
-          name: u.name,
-          description: '',
-          type: 'Fiber',
-          admin_state: u.adminState || 'Enabled',
-          status:
-            u.adminState === 'Disabled'
-              ? 'Down'
-              : u.name.startsWith('xgei')
-              ? '10G-FullD'
-              : '1G-FullD',
-          negotiation: u.speed,
-          mtu: 1600,
-          wavelength: u.name.startsWith('xgei') ? '1310' : '16652',
-          signal_dbm: u.name.startsWith('xgei') ? 'Tx: -4.85 / Rx: N/A' : '',
-          temp_c: u.name.startsWith('xgei') ? '41.5' : 'N/A',
-          pvid_untag: u.pvidUntag,
-          tagged_vlans: u.taggedVlans,
-        }))
-      : state.uplink_ports.filter((u) => u.olt_id === oltId);
+      ? dedupeUplinkPorts(
+          parsed.uplinks.map((u, idx) => {
+            const prev = existingUplinkByName.get(u.name.trim().toLowerCase());
+            return {
+              id: prev?.id ?? oltId * 100 + idx + 1,
+              olt_id: oltId,
+              name: u.name,
+              description: prev?.description || '',
+              type: prev?.type || 'Fiber',
+              admin_state: u.adminState || prev?.admin_state || 'Enabled',
+              status:
+                u.adminState === 'Disabled'
+                  ? 'Down'
+                  : u.name.startsWith('xgei')
+                  ? '10G-FullD'
+                  : '1G-FullD',
+              negotiation: u.speed || prev?.negotiation || 'Auto',
+              mtu: prev?.mtu || 1600,
+              wavelength: prev?.wavelength || (u.name.startsWith('xgei') ? '1310' : '16652'),
+              signal_dbm:
+                prev?.signal_dbm || (u.name.startsWith('xgei') ? 'Tx: -4.85 / Rx: N/A' : ''),
+              temp_c: prev?.temp_c || (u.name.startsWith('xgei') ? '41.5' : 'N/A'),
+              pvid_untag: u.pvidUntag,
+              tagged_vlans: u.taggedVlans,
+            };
+          })
+        )
+      : existingOltUplinks;
 
   // 4. Configured ONUs (Non-Destructive Merge with existing authorized ONUs in state.onus)
   const otherOnus = state.onus.filter((o) => o.olt_id !== oltId);
@@ -5281,9 +5333,11 @@ app.post(
             nextState.pon_ports,
             currentDbState.pon_ports
           );
-          nextState.uplink_ports = mergeCollectionById(
-            nextState.uplink_ports,
-            currentDbState.uplink_ports
+          nextState.uplink_ports = dedupeUplinkPorts(
+            mergeCollectionById(
+              nextState.uplink_ports,
+              currentDbState.uplink_ports
+            )
           );
           nextState.vlans = mergeCollectionById(nextState.vlans, currentDbState.vlans);
           nextState.tr069_profiles = mergeCollectionById(
@@ -6250,9 +6304,11 @@ app.post('/api/backup/restore', requireRoles('ADMIN'), async (req, res) => {
               currentState.pon_ports,
               incomingState.pon_ports || []
             ),
-            uplink_ports: mergeById(
-              currentState.uplink_ports,
-              incomingState.uplink_ports || []
+            uplink_ports: dedupeUplinkPorts(
+              mergeById(
+                currentState.uplink_ports,
+                incomingState.uplink_ports || []
+              )
             ),
             vlans: mergeById(currentState.vlans, incomingState.vlans || []),
             zones: mergeById(currentState.zones, incomingState.zones || []),

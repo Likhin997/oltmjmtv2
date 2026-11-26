@@ -308,9 +308,15 @@ Rack Shelf Slot CfgType RealType Port   HardVer SoftVer         Status
   const activeMgmtVlanId =
     defaultTr069Profile?.mgmt_vlan_id || oltMgmtVlan?.vlan_id || 100;
   const oltCards: OltCardRecord[] = db.olt_cards.filter((c) => c.olt_id === olt.id);
-  const uplinkPorts: UplinkPortRecord[] = db.uplink_ports.filter(
-    (u) => u.olt_id === olt.id
-  );
+  const uplinkPorts: UplinkPortRecord[] = (() => {
+    const seen = new Map<string, UplinkPortRecord>();
+    for (const u of db.uplink_ports) {
+      if (u.olt_id !== olt.id || !u.name) continue;
+      const key = u.name.trim().toLowerCase();
+      if (!seen.has(key)) seen.set(key, u);
+    }
+    return Array.from(seen.values());
+  })();
 
   // Build dynamic GPON slot groups across ALL detected GPON boards on this OLT (e.g. Slot 1, Slot 2, Slot 3...)
   const gponSlotGroups: Array<{
