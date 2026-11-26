@@ -2329,226 +2329,231 @@ ${oltVlans
           MODAL 1: CONFIGURE UPLINK PORT & TAG VLANS (SmartOLT Uplink Modal)
          =================================================================== */}
       {configuringUplink && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-2xl rounded-xl border border-slate-700 bg-[#151c28] text-slate-100 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-slate-700 px-6 py-4">
-              <div>
-                <h3 className="text-base font-bold text-white">
-                  Configure Uplink Port & Tag VLANs —{' '}
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-2 sm:p-4 backdrop-blur-xs">
+          <div className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-slate-700 bg-[#151c28] text-slate-100 shadow-2xl">
+            <div className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-700 px-4 py-3 sm:px-6 sm:py-4">
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-white sm:text-base">
+                  Configure Uplink Port &amp; Tag VLANs —{' '}
                   <span className="font-mono text-sky-400">
                     {configuringUplink.name}
                   </span>
                 </h3>
-                <p className="text-xs text-slate-400">
+                <p className="mt-0.5 text-[11px] text-slate-400 sm:text-xs">
                   Pilih VLAN yang akan di-tag (trunk/hybrid) melewati port uplink `{configuringUplink.name}` menuju Router Core.
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => setConfiguringUplink(null)}
-                className="text-slate-400 hover:text-white"
+                className="shrink-0 rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveUplinkConfig} className="space-y-4 p-6 text-xs">
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="block font-bold text-slate-200">
-                    Admin State
-                  </label>
-                  <select
-                    value={uplinkEditAdmin}
-                    onChange={(e) =>
-                      setUplinkEditAdmin(
-                        e.target.value as 'Enabled' | 'Disabled'
-                      )
-                    }
-                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
-                  >
-                    <option value="Enabled">Enabled (no shutdown)</option>
-                    <option value="Disabled">Disabled (shutdown)</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block font-bold text-slate-200">
-                    Link Speed / Status
-                  </label>
-                  <select
-                    value={uplinkEditStatus}
-                    onChange={(e) =>
-                      setUplinkEditStatus(
-                        e.target.value as '1G-FullD' | '10G-FullD' | 'Down'
-                      )
-                    }
-                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
-                  >
-                    <option value="1G-FullD">1G-FullD (Up)</option>
-                    <option value="10G-FullD">10G-FullD (Up)</option>
-                    <option value="Down">Down</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block font-bold text-slate-200">
-                    Description
-                  </label>
-                  <input
-                    type="text"
-                    value={uplinkEditDesc}
-                    onChange={(e) => setUplinkEditDesc(e.target.value)}
-                    placeholder="e.g. Uplink Core Router MikroTik CCR"
-                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold text-slate-200">
-                    Switchport Mode
-                  </label>
-                  <select
-                    value={uplinkEditMode}
-                    onChange={(e) =>
-                      setUplinkEditMode(
-                        e.target.value as 'Hybrid' | 'Trunk' | 'Access'
-                      )
-                    }
-                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
-                  >
-                    <option value="Hybrid">Hybrid (Tagged + PVID Untag)</option>
-                    <option value="Trunk">Trunk (802.1Q Tagged Only)</option>
-                    <option value="Access">Access (Untagged Only)</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block font-bold text-slate-200">
-                    PVID Untagged VLAN
-                  </label>
-                  <input
-                    type="number"
-                    value={uplinkEditPvid}
-                    onChange={(e) => setUplinkEditPvid(Number(e.target.value))}
-                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold text-slate-200">MTU</label>
-                  <input
-                    type="number"
-                    value={uplinkEditMtu}
-                    onChange={(e) => setUplinkEditMtu(Number(e.target.value))}
-                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
-                  />
-                </div>
-              </div>
-
-              {/* Interactive VLAN Tagging Checkboxes */}
-              {uplinkEditMode !== 'Access' && (
-                <div className="space-y-2.5 rounded-lg border border-sky-500/40 bg-[#102036] p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-bold text-sky-300">
-                      Select OLT VLANs to Tag on `{configuringUplink.name}`:
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const allIds = oltVlans.map((v) => v.vlan_id);
-                          setUplinkSelectedVlans(allIds);
-                          setUplinkCustomVlanStr(allIds.join(','));
-                        }}
-                        className="rounded bg-sky-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-sky-500"
-                      >
-                        Tag All OLT VLANs
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setUplinkSelectedVlans([]);
-                          setUplinkCustomVlanStr('');
-                        }}
-                        className="rounded bg-slate-700 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-600"
-                      >
-                        Clear
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                    {oltVlans.map((v) => {
-                      const checked = uplinkSelectedVlans.includes(v.vlan_id);
-                      return (
-                        <label
-                          key={v.id}
-                          className={`flex cursor-pointer items-center gap-2 rounded border px-3 py-2 transition ${
-                            checked
-                              ? 'border-emerald-500 bg-emerald-950/50 text-white'
-                              : 'border-slate-700 bg-slate-900/60 text-slate-300'
-                          }`}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => toggleUplinkVlanSelection(v.vlan_id)}
-                            className="h-3.5 w-3.5 rounded accent-emerald-500"
-                          />
-                          <span className="font-mono font-bold text-sky-400">
-                            {v.vlan_id}
-                          </span>
-                          <span className="truncate text-[11px]">
-                            {v.description || v.name}
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
-
+            <form
+              onSubmit={handleSaveUplinkConfig}
+              className="flex min-h-0 flex-1 flex-col overflow-hidden text-xs"
+            >
+              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-6">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
                   <div>
-                    <label className="block text-[11px] text-slate-300">
-                      Tagged VLANs List / Range (contoh: `100,101,102,120` atau `100-102`):
+                    <label className="block font-bold text-slate-200">
+                      Admin State
+                    </label>
+                    <select
+                      value={uplinkEditAdmin}
+                      onChange={(e) =>
+                        setUplinkEditAdmin(
+                          e.target.value as 'Enabled' | 'Disabled'
+                        )
+                      }
+                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                    >
+                      <option value="Enabled">Enabled (no shutdown)</option>
+                      <option value="Disabled">Disabled (shutdown)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-200">
+                      Link Speed / Status
+                    </label>
+                    <select
+                      value={uplinkEditStatus}
+                      onChange={(e) =>
+                        setUplinkEditStatus(
+                          e.target.value as '1G-FullD' | '10G-FullD' | 'Down'
+                        )
+                      }
+                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                    >
+                      <option value="1G-FullD">1G-FullD (Up)</option>
+                      <option value="10G-FullD">10G-FullD (Up)</option>
+                      <option value="Down">Down</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-200">
+                      Description
                     </label>
                     <input
                       type="text"
-                      value={uplinkCustomVlanStr}
-                      onChange={(e) => setUplinkCustomVlanStr(e.target.value)}
-                      placeholder="100,101,102,120"
-                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-xs text-emerald-300"
+                      value={uplinkEditDesc}
+                      onChange={(e) => setUplinkEditDesc(e.target.value)}
+                      placeholder="e.g. Uplink Core Router MikroTik CCR"
+                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-200">
+                      Switchport Mode
+                    </label>
+                    <select
+                      value={uplinkEditMode}
+                      onChange={(e) =>
+                        setUplinkEditMode(
+                          e.target.value as 'Hybrid' | 'Trunk' | 'Access'
+                        )
+                      }
+                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                    >
+                      <option value="Hybrid">Hybrid (Tagged + PVID Untag)</option>
+                      <option value="Trunk">Trunk (802.1Q Tagged Only)</option>
+                      <option value="Access">Access (Untagged Only)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-200">
+                      PVID Untagged VLAN
+                    </label>
+                    <input
+                      type="number"
+                      value={uplinkEditPvid}
+                      onChange={(e) => setUplinkEditPvid(Number(e.target.value))}
+                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-200">MTU</label>
+                    <input
+                      type="number"
+                      value={uplinkEditMtu}
+                      onChange={(e) => setUplinkEditMtu(Number(e.target.value))}
+                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
                     />
                   </div>
                 </div>
-              )}
 
-              {/* Live ZTE CLI Preview */}
-              <div className="rounded border border-slate-800 bg-slate-950 p-3">
-                <div className="mb-1 font-mono text-[11px] font-bold text-emerald-400">
-                  ZTE OLT Uplink CLI Script Preview:
+                {/* Interactive VLAN Tagging Checkboxes */}
+                {uplinkEditMode !== 'Access' && (
+                  <div className="space-y-2.5 rounded-lg border border-sky-500/40 bg-[#102036] p-3 sm:p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-bold text-sky-300">
+                        Select OLT VLANs to Tag on `{configuringUplink.name}`:
+                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const allIds = oltVlans.map((v) => v.vlan_id);
+                            setUplinkSelectedVlans(allIds);
+                            setUplinkCustomVlanStr(allIds.join(','));
+                          }}
+                          className="rounded bg-sky-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-sky-500"
+                        >
+                          Tag All OLT VLANs
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setUplinkSelectedVlans([]);
+                            setUplinkCustomVlanStr('');
+                          }}
+                          className="rounded bg-slate-700 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-600"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid max-h-40 grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 md:grid-cols-3">
+                      {oltVlans.map((v) => {
+                        const checked = uplinkSelectedVlans.includes(v.vlan_id);
+                        return (
+                          <label
+                            key={v.id}
+                            className={`flex cursor-pointer items-center gap-2 rounded border px-3 py-2 transition ${
+                              checked
+                                ? 'border-emerald-500 bg-emerald-950/50 text-white'
+                                : 'border-slate-700 bg-slate-900/60 text-slate-300'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleUplinkVlanSelection(v.vlan_id)}
+                              className="h-3.5 w-3.5 shrink-0 rounded accent-emerald-500"
+                            />
+                            <span className="font-mono font-bold text-sky-400">
+                              {v.vlan_id}
+                            </span>
+                            <span className="truncate text-[11px]">
+                              {v.description || v.name}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] text-slate-300">
+                        Tagged VLANs List / Range (contoh: `100,101,102,120` atau `100-102`):
+                      </label>
+                      <input
+                        type="text"
+                        value={uplinkCustomVlanStr}
+                        onChange={(e) => setUplinkCustomVlanStr(e.target.value)}
+                        placeholder="100,101,102,120"
+                        className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-xs text-emerald-300"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Live ZTE CLI Preview */}
+                <div className="rounded border border-slate-800 bg-slate-950 p-3">
+                  <div className="mb-1 font-mono text-[11px] font-bold text-emerald-400">
+                    ZTE OLT Uplink CLI Script Preview:
+                  </div>
+                  <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] text-emerald-300 sm:whitespace-pre">
+                    {generateUplinkConfigCliScript({
+                      uplinkName: configuringUplink.name,
+                      description: uplinkEditDesc,
+                      adminState: uplinkEditAdmin,
+                      portMode: uplinkEditMode,
+                      pvidUntag: uplinkEditPvid,
+                      taggedVlans:
+                        uplinkCustomVlanStr || uplinkSelectedVlans.join(','),
+                      mtu: uplinkEditMtu,
+                    })}
+                  </pre>
                 </div>
-                <pre className="font-mono text-[11px] text-emerald-300">
-                  {generateUplinkConfigCliScript({
-                    uplinkName: configuringUplink.name,
-                    description: uplinkEditDesc,
-                    adminState: uplinkEditAdmin,
-                    portMode: uplinkEditMode,
-                    pvidUntag: uplinkEditPvid,
-                    taggedVlans:
-                      uplinkCustomVlanStr || uplinkSelectedVlans.join(','),
-                    mtu: uplinkEditMtu,
-                  })}
-                </pre>
               </div>
 
-              <div className="flex items-center justify-end gap-3 border-t border-slate-700 pt-3">
+              <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-slate-700 bg-[#151c28] px-4 py-3 sm:gap-3 sm:px-6">
                 <button
                   type="button"
                   onClick={() => setConfiguringUplink(null)}
-                  className="px-4 py-2 text-xs font-semibold text-sky-400"
+                  className="rounded px-4 py-2 text-xs font-semibold text-sky-400 hover:bg-slate-800"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="rounded bg-[#4caf50] px-5 py-2 text-xs font-bold text-white hover:bg-[#43a047]"
+                  className="rounded bg-[#4caf50] px-4 py-2 text-xs font-bold text-white hover:bg-[#43a047] sm:px-5"
                 >
-                  Save & Tag VLANs on Uplink
+                  Save &amp; Tag VLANs on Uplink
                 </button>
               </div>
             </form>
@@ -2560,10 +2565,10 @@ ${oltVlans
           MODAL 2: ADD VLAN / ADD MULTIPLE VLANS / DELETE MULTIPLE VLANS
          =================================================================== */}
       {(vlanModalMode === 'SINGLE' || vlanModalMode === 'MULTIPLE') && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-xl rounded-xl border border-slate-700 bg-[#151c28] text-slate-100 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-slate-700 px-6 py-4">
-              <h3 className="text-base font-bold text-white">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-2 sm:p-4 backdrop-blur-xs">
+          <div className="flex max-h-[92vh] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-slate-700 bg-[#151c28] text-slate-100 shadow-2xl">
+            <div className="flex shrink-0 items-center justify-between border-b border-slate-700 px-4 py-3 sm:px-6 sm:py-4">
+              <h3 className="text-sm font-bold text-white sm:text-base">
                 {vlanModalMode === 'SINGLE'
                   ? 'Add VLAN & Tag to Uplink'
                   : 'Add Multiple VLANs (Range) & Tag to Uplink'}
@@ -2579,7 +2584,7 @@ ${oltVlans
 
             <form
               onSubmit={handleCreateVlansSubmit}
-              className="space-y-4 p-6 text-xs"
+              className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 text-xs sm:p-6"
             >
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 {vlanModalMode === 'SINGLE' ? (
@@ -2765,8 +2770,8 @@ ${oltVlans
 
       {/* MODAL 2B: DELETE MULTIPLE VLANS */}
       {vlanModalMode === 'DELETE_MULTIPLE' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-md rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-2 sm:p-4 backdrop-blur-xs">
+          <div className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-700 bg-[#151c28] p-4 text-xs text-slate-100 shadow-2xl sm:p-6">
             <div className="mb-3 flex items-center justify-between border-b border-slate-700 pb-3">
               <h3 className="text-base font-bold text-white">
                 Delete Multiple VLANs
@@ -2832,8 +2837,8 @@ ${oltVlans
 
       {/* MODAL 2C: QUICK TAG SINGLE VLAN TO UPLINK PORTS */}
       {quickTaggingVlan && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-md rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-2 sm:p-4 backdrop-blur-xs">
+          <div className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-700 bg-[#151c28] p-4 text-xs text-slate-100 shadow-2xl sm:p-6">
             <div className="mb-3 flex items-center justify-between border-b border-slate-700 pb-3">
               <h3 className="text-base font-bold text-white">
                 Tag VLAN {quickTaggingVlan.vlan_id} ({quickTaggingVlan.description}) to Uplink
@@ -2909,8 +2914,8 @@ ${oltVlans
           MODAL 3: CREATE LAG (SMARTGROUP LACP) ON UPLINK
          =================================================================== */}
       {showCreateLagModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-md rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-2 sm:p-4 backdrop-blur-xs">
+          <div className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-700 bg-[#151c28] p-4 text-xs text-slate-100 shadow-2xl sm:p-6">
             <div className="mb-3 flex items-center justify-between border-b border-slate-700 pb-3">
               <h3 className="text-base font-bold text-white">
                 Create Link Aggregation Group (LACP Smartgroup)
@@ -3044,8 +3049,8 @@ ${oltVlans
           MODAL 4: CONFIGURE PON PORT (Slot 3 GTGH)
          =================================================================== */}
       {configuringPonPort && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-md rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-2 sm:p-4 backdrop-blur-xs">
+          <div className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-700 bg-[#151c28] p-4 text-xs text-slate-100 shadow-2xl sm:p-6">
             <div className="mb-3 flex items-center justify-between border-b border-slate-700 pb-3">
               <h3 className="text-base font-bold text-white">
                 Configure PON Port —{' '}
@@ -3175,8 +3180,8 @@ ${oltVlans
 
       {/* MODAL 5: UPLINK OR PON TRAFFIC GRAPH MODAL */}
       {(trafficUplink || trafficPonPort) && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-4xl rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-2 sm:p-4 backdrop-blur-xs">
+          <div className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-xl border border-slate-700 bg-[#151c28] p-4 text-xs text-slate-100 shadow-2xl sm:p-6">
             <div className="mb-3 flex items-center justify-between border-b border-slate-700 pb-3">
               <h3 className="text-base font-bold text-white">
                 Real-Time Interface Traffic —{' '}
@@ -3244,8 +3249,8 @@ ${oltVlans
 
       {/* MODAL 6: EDIT OLT SETTINGS */}
       {showEditOltModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-md rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-2 sm:p-4 backdrop-blur-xs">
+          <div className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-700 bg-[#151c28] p-4 text-xs text-slate-100 shadow-2xl sm:p-6">
             <div className="mb-3 flex items-center justify-between border-b border-slate-700 pb-3">
               <h3 className="text-base font-bold text-white">
                 Edit OLT Settings — {olt.name}
@@ -3347,8 +3352,8 @@ ${oltVlans
 
       {/* MODAL 7: CONFIG BACKUPS & MAC TABLE */}
       {(showBackupsModal || showMacTableModal) && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-xl rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-2 sm:p-4 backdrop-blur-xs">
+          <div className="max-h-[92vh] w-full max-w-xl overflow-y-auto rounded-xl border border-slate-700 bg-[#151c28] p-4 text-xs text-slate-100 shadow-2xl sm:p-6">
             <div className="mb-3 flex items-center justify-between border-b border-slate-700 pb-3">
               <h3 className="text-base font-bold text-white">
                 {showBackupsModal
