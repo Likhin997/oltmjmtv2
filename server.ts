@@ -5256,8 +5256,16 @@ app.post(
           }
         }
 
+        const currentTokenHash = authedReq.authSession?.token_hash || null;
+        const isMaskedOrBlankPwd = (val?: string | null): boolean => {
+          const s = String(val || '').trim();
+          return !s || s === MASKED_SECRET || /^[•*●]+$/.test(s);
+        };
+
         nextState.users = nextState.users.map((u) => {
           const prev = existingUsers.find((eu) => eu.id === u.id);
+          const cleanUsername = String(u.username || prev?.username || '').trim();
+          const safeActive = prev && prev.id === authUser?.id ? true : Boolean(u.is_active);
           // Prevent non-root tenants or non-SUPERADMIN accounts from ever assigning SUPERADMIN role
           const safeRole: AppUserRecord['role'] =
             tenantId !== ROOT_TENANT_ID && u.role === 'SUPERADMIN'
@@ -5272,19 +5280,59 @@ app.post(
               ? 'SUPERADMIN'
               : u.role;
 
-          if (prev && (!u.password || u.password === MASKED_SECRET)) {
-            return { ...u, tenant_id: tenantId, role: safeRole, password: prev.password };
+          // Keep active session username/role synchronized when an existing user is renamed or updated
+          if (
+            prev &&
+            (prev.username.toLowerCase() !== cleanUsername.toLowerCase() ||
+              prev.role !== safeRole)
+          ) {
+            sqliteDb
+              .prepare(
+                `UPDATE auth_sessions SET username = ?, role = ? WHERE tenant_id = ? AND user_id = ?`
+              )
+              .run(cleanUsername, safeRole, tenantId, prev.id);
+          }
+
+          if (
+            prev &&
+            (isMaskedOrBlankPwd(u.password) ||
+              (!isScryptHash(u.password) && timingSafePasswordEqual(u.password, prev.password)))
+          ) {
+            return {
+              ...u,
+              username: cleanUsername,
+              tenant_id: tenantId,
+              role: safeRole,
+              is_active: safeActive,
+              password: prev.password,
+            };
           }
           const finalPwd = isScryptHash(u.password)
             ? u.password
             : hashPasswordScrypt(u.password || crypto.randomBytes(12).toString('hex'));
-          // Cabut sesi aktif user di tenant ini jika password diubah oleh Admin
+          // Cabut sesi aktif user di tenant ini jika password benar-benar diubah oleh Admin
+          // (untuk edit akun sendiri, pertahankan sesi yang sedang aktif saat ini)
           if (prev && prev.password !== finalPwd) {
-            sqliteDb
-              .prepare(`DELETE FROM auth_sessions WHERE tenant_id = ? AND user_id = ?`)
-              .run(tenantId, prev.id);
+            if (prev.id === authUser?.id && currentTokenHash) {
+              sqliteDb
+                .prepare(
+                  `DELETE FROM auth_sessions WHERE tenant_id = ? AND user_id = ? AND token_hash != ?`
+                )
+                .run(tenantId, prev.id, currentTokenHash);
+            } else {
+              sqliteDb
+                .prepare(`DELETE FROM auth_sessions WHERE tenant_id = ? AND user_id = ?`)
+                .run(tenantId, prev.id);
+            }
           }
-          return { ...u, tenant_id: tenantId, role: safeRole, password: finalPwd };
+          return {
+            ...u,
+            username: cleanUsername,
+            tenant_id: tenantId,
+            role: safeRole,
+            is_active: safeActive,
+            password: finalPwd,
+          };
         });
 
         // Immediately revoke active sessions for any user in THIS tenant that was deleted or deactivated
@@ -5472,6 +5520,9 @@ app.post(
         stateVersion: getTenantStateVersion(tenantId),
         dbEngine: activeDbEngine,
         pgConnected,
+        ...(isAdminRole(authUser?.role)
+          ? { users: nextState.users.map(sanitizeUserForClient) }
+          : {}),
         ...(shouldEchoState
           ? { state: sanitizeStateForClient(nextState, authUser?.role) }
           : {}),
@@ -7076,6 +7127,11 @@ app.post(
       const oltIf = `${isEp ? 'epon-olt_' : 'gpon-olt_'}${coords}`;
       if (!combinedSyncOutput.includes(`show pon power onu-rx ${oltIf}`)) {
         telemetryCmds.push(`show pon power onu-rx ${oltIf}`);
+      }
+    }
+    for (const u of prelimParsed.uplinks || []) {
+      if (/\bnone\b/i.test(u.taggedVlans || '')) {
+        telemetryCmds.push(`show running-config interface ${u.name}`);
       }
     }
     const workingIfs = prelimStates

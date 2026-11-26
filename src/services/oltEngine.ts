@@ -2652,7 +2652,7 @@ export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConf
 
   // 3. Parse `interface gpon-olt_1/x/y` & `interface epon-olt_1/x/y` (ETGH/ETGO) for ONU registrations & port admin state
   const oltBlockRegex =
-    /interface\s+(gpon|epon)-olt_(\d+)\/(\d+)\/(\d+)([\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|epon-olt|epon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|$)/gim;
+    /^\s*interface\s+(gpon|epon)-olt_(\d+)\/(\d+)\/(\d+)([^\r\n]*\r?\n[\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|epon-olt|epon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|(?![\s\S]))/gim;
   let ob: RegExpExecArray | null;
   while ((ob = oltBlockRegex.exec(rawConfig)) !== null) {
     const proto = ob[1].toLowerCase();
@@ -2743,7 +2743,7 @@ export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConf
 
   // 4. Parse `interface gpon-onu_1/x/y:z` & `interface epon-onu_1/x/y:z`
   const onuIfRegex =
-    /interface\s+(?:gpon|epon)-onu_(\d+)\/(\d+)\/(\d+):(\d+)([\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|epon-olt|epon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|$)/gim;
+    /^\s*interface\s+(?:gpon|epon)-onu_(\d+)\/(\d+)\/(\d+):(\d+)([^\r\n]*\r?\n[\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|epon-olt|epon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|(?![\s\S]))/gim;
   let oib: RegExpExecArray | null;
   while ((oib = onuIfRegex.exec(rawConfig)) !== null) {
     const board = parseInt(oib[2], 10);
@@ -2818,7 +2818,7 @@ export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConf
 
   // 5. Parse `pon-onu-mng gpon-onu_1/x/y:z` & `pon-onu-mng epon-onu_1/x/y:z`
   const mngRegex =
-    /pon-onu-mng\s+(?:gpon|epon)-onu_(\d+)\/(\d+)\/(\d+):(\d+)([\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|epon-olt|epon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|$)/gim;
+    /^\s*pon-onu-mng\s+(?:gpon|epon)-onu_(\d+)\/(\d+)\/(\d+):(\d+)([^\r\n]*\r?\n[\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+(?:gpon-olt|gpon-onu|epon-olt|epon-onu|x?gei|smartgroup|vlan|null|loopback)|^\s*pon-onu-mng\s+|(?![\s\S]))/gim;
   let mb: RegExpExecArray | null;
   while ((mb = mngRegex.exec(rawConfig)) !== null) {
     const board = parseInt(mb[2], 10);
@@ -2956,7 +2956,7 @@ export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConf
   >();
 
   const uplinkRegex =
-    /^\s*interface\s+((?:x?gei)_\d+\/\d+\/\d+)\b([^\r\n]*\r?\n[\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+|$)/gim;
+    /^\s*interface\s+((?:x?gei)_\d+\/\d+\/\d+|smartgroup\d+)\b([^\r\n]*\r?\n[\s\S]*?)(?=^\s*!\s*$|^\s*end\s*$|^\s*interface\s+|(?![\s\S]))/gim;
   let ub: RegExpExecArray | null;
   while ((ub = uplinkRegex.exec(rawConfig)) !== null) {
     const name = ub[1].trim();

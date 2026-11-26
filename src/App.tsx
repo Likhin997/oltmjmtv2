@@ -560,6 +560,17 @@ export default function App() {
           if (typeof data?.stateVersion === 'number') {
             serverStateVersionRef.current = data.stateVersion;
           }
+          if (Array.isArray(data?.users) && data.users.length > 0) {
+            skipNextServerSyncRef.current = true;
+            setDb((prev) => ({ ...prev, users: data.users }));
+            const selfUpdated = data.users.find(
+              (u: AppUserRecord) =>
+                authenticatedUser && u.id === authenticatedUser.id && u.is_active
+            );
+            if (selfUpdated) {
+              setAuthenticatedUser(selfUpdated);
+            }
+          }
           if (
             !effectiveUserMut &&
             Date.now() - lastUserMutationAtRef.current > 5000 &&
@@ -10957,7 +10968,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                       setUserFormUsername(u.username);
                                       setUserFormFullName(u.full_name);
                                       setUserFormEmail(u.email);
-                                      setUserFormPassword(u.password);
+                                      setUserFormPassword('');
                                       setUserFormRole(u.role);
                                       setUserFormActive(u.is_active);
                                       setUserFormAllOlts(u.access_all_olts);
@@ -11047,6 +11058,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
 
                           nextSyncIsUserMutationRef.current = true;
                           if (editingUser) {
+                            const trimmedPwd = userFormPassword.trim();
+                            const hasRealNewPassword =
+                              trimmedPwd.length > 0 && !/^[•*●]+$/.test(trimmedPwd);
+                            const isSelfEdit = editingUser.id === currentUser.id;
                             setDb((prev) => {
                               const currentList = Array.isArray(prev.users)
                                 ? prev.users
@@ -11064,10 +11079,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                         email:
                                           userFormEmail.trim() ||
                                           `${cleanUsername}@jetcybernet.id`,
-                                        password:
-                                          userFormPassword || u.password,
+                                        password: hasRealNewPassword
+                                          ? trimmedPwd
+                                          : '••••••••',
                                         role: userFormRole,
-                                        is_active: userFormActive,
+                                        is_active: isSelfEdit
+                                          ? true
+                                          : userFormActive,
                                         access_all_olts: userFormAllOlts,
                                         allowed_olt_ids: userFormOltIds,
                                         access_all_zones: userFormAllZones,
@@ -11173,14 +11191,23 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                           <div>
                             <label className="block font-bold text-slate-200">
-                              Password *
+                              {editingUser
+                                ? 'Password Baru (Opsional)'
+                                : 'Password *'}
                             </label>
                             <input
-                              type="text"
-                              required
+                              type="password"
+                              name="smartolt_user_pwd_field"
+                              autoComplete="new-password"
+                              required={!editingUser}
                               value={userFormPassword}
                               onChange={(e) =>
                                 setUserFormPassword(e.target.value)
+                              }
+                              placeholder={
+                                editingUser
+                                  ? 'Kosongkan jika tidak ingin ubah password'
+                                  : 'Masukkan password user'
                               }
                               className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-emerald-300"
                             />
@@ -11223,11 +11250,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             <label className="flex cursor-pointer items-center gap-2 font-bold text-white">
                               <input
                                 type="checkbox"
-                                checked={userFormActive}
+                                checked={
+                                  editingUser?.id === currentUser.id
+                                    ? true
+                                    : userFormActive
+                                }
+                                disabled={editingUser?.id === currentUser.id}
                                 onChange={(e) =>
                                   setUserFormActive(e.target.checked)
                                 }
-                                className="h-4 w-4 rounded border-slate-600"
+                                className="h-4 w-4 rounded border-slate-600 disabled:opacity-60"
                               />
                               Akun Aktif (Dapat Login)
                             </label>
