@@ -6,7 +6,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, useDeferredValue } from 'react';
 import {
   INITIAL_DB_STATE,
-  DEFAULT_APP_USERS,
   SmartOltDatabaseState,
   OltRecord,
   OnuRecord,
@@ -159,7 +158,10 @@ interface ActiveImpersonatorInfo {
 }
 
 export default function App() {
-  const [db, setDb] = useState<SmartOltDatabaseState>(INITIAL_DB_STATE);
+  const [db, setDb] = useState<SmartOltDatabaseState>(() => ({
+    ...INITIAL_DB_STATE,
+    users: [],
+  }));
   const [dbLoaded, setDbLoaded] = useState(false);
   const [authChecking, setAuthChecking] = useState<boolean>(true);
   const [authenticatedUser, setAuthenticatedUser] =
@@ -1447,17 +1449,28 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   const appUsers: AppUserRecord[] =
     Array.isArray(db.users) && db.users.length > 0
       ? db.users
-      : DEFAULT_APP_USERS;
+      : authenticatedUser
+      ? [authenticatedUser]
+      : [];
 
-  const currentUser: AppUserRecord | null =
-    loggedInUserId !== null
-      ? appUsers.find((u) => u.id === loggedInUserId && u.is_active) ||
-        (authenticatedUser &&
-        authenticatedUser.id === loggedInUserId &&
-        authenticatedUser.is_active
-          ? authenticatedUser
-          : null)
-      : null;
+  const currentUser: AppUserRecord | null = (() => {
+    if (!authenticatedUser || !authenticatedUser.is_active) return null;
+    if (loggedInUserId !== null && authenticatedUser.id !== loggedInUserId) {
+      return null;
+    }
+    const matchedDbUser =
+      Array.isArray(db.users) && db.users.length > 0
+        ? db.users.find(
+            (u) =>
+              u.id === authenticatedUser.id &&
+              u.username.toLowerCase() ===
+                authenticatedUser.username.toLowerCase() &&
+              u.role === authenticatedUser.role &&
+              u.is_active
+          )
+        : undefined;
+    return matchedDbUser || authenticatedUser;
+  })();
 
   const isSuperadminUser = currentUser?.role === 'SUPERADMIN';
   const isAdminUser =
@@ -10976,9 +10989,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                       nextSyncIsUserMutationRef.current = true;
                                       setDb((prev) => ({
                                         ...prev,
-                                        users: (
-                                          prev.users || DEFAULT_APP_USERS
-                                        ).filter((item) => item.id !== u.id),
+                                        users: (prev.users || []).filter(
+                                          (item) => item.id !== u.id
+                                        ),
                                       }));
                                       showToast(`User "${u.username}" dihapus.`);
                                     }}
@@ -11035,11 +11048,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           nextSyncIsUserMutationRef.current = true;
                           if (editingUser) {
                             setDb((prev) => {
-                              const currentList =
-                                Array.isArray(prev.users) &&
-                                prev.users.length > 0
-                                  ? prev.users
-                                  : DEFAULT_APP_USERS;
+                              const currentList = Array.isArray(prev.users)
+                                ? prev.users
+                                : [];
                               return {
                                 ...prev,
                                 users: currentList.map((u) =>
@@ -11097,11 +11108,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                               created_at: `${nowWib} WIB`,
                             };
                             setDb((prev) => {
-                              const currentList =
-                                Array.isArray(prev.users) &&
-                                prev.users.length > 0
-                                  ? prev.users
-                                  : DEFAULT_APP_USERS;
+                              const currentList = Array.isArray(prev.users)
+                                ? prev.users
+                                : [];
                               return {
                                 ...prev,
                                 users: [...currentList, newUser],

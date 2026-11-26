@@ -3826,7 +3826,13 @@ async function resolveActiveSessionUser(
 
   const state = await loadDatabaseState(tenantId);
   const users = bootstrapAndHashUsers(state.users, tenantId);
-  const user = users.find((u) => u.id === row.user_id && u.is_active);
+  const sessionUsername = String(row.username || '').trim().toLowerCase();
+  const user = users.find(
+    (u) =>
+      u.id === row.user_id &&
+      (!sessionUsername || u.username.toLowerCase() === sessionUsername) &&
+      u.is_active
+  );
   if (!user) {
     sqliteDb
       .prepare(`DELETE FROM auth_sessions WHERE token_hash = ?`)
@@ -5252,10 +5258,14 @@ app.post(
 
         nextState.users = nextState.users.map((u) => {
           const prev = existingUsers.find((eu) => eu.id === u.id);
-          // Prevent non-root tenants from ever assigning SUPERADMIN role
+          // Prevent non-root tenants or non-SUPERADMIN accounts from ever assigning SUPERADMIN role
           const safeRole: AppUserRecord['role'] =
             tenantId !== ROOT_TENANT_ID && u.role === 'SUPERADMIN'
               ? 'ADMIN'
+              : !isSuperadminRole(authUser?.role) && u.role === 'SUPERADMIN'
+              ? prev?.role === 'SUPERADMIN'
+                ? 'SUPERADMIN'
+                : 'ADMIN'
               : tenantId === ROOT_TENANT_ID &&
                 prev?.role === 'SUPERADMIN' &&
                 !isSuperadminRole(authUser?.role)
