@@ -2094,7 +2094,7 @@ function runRawTelnetSession(params: {
       const isSlowCmd = /^(write|wr|show\s+running-config|show\s+onu|show\s+gpon|show\s+pon|show\s+card|reset-card|no\s+onu\s+\d+|onu\s+\d+\s+type)/i.test(
         cmd.trim()
       );
-      const idleLimitMs = isFullRunCfg ? 22000 : isSlowCmd ? 10000 : 900;
+      const idleLimitMs = isFullRunCfg ? 22000 : isSlowCmd ? 10000 : 2500;
       stepTimer = setTimeout(() => {
         if (waitingForPrompt && stage === 'EXEC_CMDS' && !settled) {
           waitingForPrompt = false;
@@ -6464,6 +6464,149 @@ let roundRobinTelemetryCursor = 0;
  * Helper to query live OLT `gpon-olt_1/<board>/<port>` and return all used ONU indices
  * and any existing index already bound to `serialNumber`.
  */
+function parseZteOnuTypeNames(output: string): string[] {
+  const found = new Set<string>();
+  const regex = /(?:ONU\s+type\s+name|OnuTypeName)\s*:\s*([A-Za-z0-9_.\-]+)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(output)) !== null) {
+    const name = m[1].trim();
+    if (name && name.length <= 40) found.add(name);
+  }
+  return Array.from(found);
+}
+
+function parseZteGponProfileSection(output: string, startMarker: RegExp, endMarker?: RegExp): string[] {
+  const startMatch = startMarker.exec(output);
+  if (!startMatch) return [];
+  let slice = output.slice(startMatch.index + startMatch[0].length);
+  if (endMarker) {
+    const endMatch = endMarker.exec(slice);
+    if (endMatch) slice = slice.slice(0, endMatch.index);
+  }
+  const found = new Set<string>();
+  const regex = /Profile\s+name\s*:\s*([A-Za-z0-9_.\-]+)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(slice)) !== null) {
+    const name = m[1].trim();
+    if (name && name.length <= 48) found.add(name);
+  }
+  return Array.from(found);
+}
+
+function pickPreferredOnuType(
+  availableTypes: string[],
+  isEpon: boolean,
+  excludeType?: string
+): string | null {
+  const filtered = availableTypes.filter(
+    (t) => !excludeType || t.toLowerCase() !== excludeType.toLowerCase()
+  );
+  if (filtered.length === 0) return null;
+  const preferredOrder = isEpon
+    ? ['ZTE-F460', 'ZTE-F420', 'ZTE-F412', 'ALL', 'DEFAULT']
+    : ['ALL', 'ZTE-F609', 'ZTE-F660', 'ZTE-F670L', 'ZTEG-F609', 'ZTE-F620', 'ZTE-F600', 'DEFAULT'];
+  for (const pref of preferredOrder) {
+    const exact = filtered.find((t) => t.toLowerCase() === pref.toLowerCase());
+    if (exact) return exact;
+  }
+  const zteGeneric = filtered.find((t) => /^zte[-_]?f6/i.test(t) || /universal|generic|all/i.test(t));
+  return zteGeneric || filtered[0];
+}
+
+function pickPreferredProfile(
+  availableProfiles: string[],
+  hints: string[],
+  excludeProfile?: string
+): string | null {
+  const filtered = availableProfiles.filter(
+    (p) => !excludeProfile || p.toLowerCase() !== excludeProfile.toLowerCase()
+  );
+  if (filtered.length === 0) return null;
+  for (const hint of hints) {
+    const matched = filtered.find((p) => p.toLowerCase().includes(hint.toLowerCase()));
+    if (matched) return matched;
+  }
+  const def = filtered.find((p) => p.toLowerCase() === 'default');
+  return def || filtered[0];
+}
+
+function extractZteCliErrors(output: string): string[] {
+  const errs: string[] = [];
+  const seen = new Set<string>();
+  const lines = String(output || '').split(/\r?\n/);
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (
+      /^%(?:Error|Code)\b/i.test(line) ||
+      /\b(?:Invalid\s+input|Incomplete\s+command|Ambiguous\s+command|does\s+not\s+exist|not\s+exist|already\s+exist|Invalid\s+parameter|Command\s+failed|No\s+such\s+profile|not\s+configured)\b/i.test(
+        line
+      )
+    ) {
+      if (!seen.has(line)) {
+        seen.add(line);
+        errs.push(line);
+      }
+    }
+  }
+  return errs;
+}
+
+function escapeRegExpLiteral(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function injectAfterConfigureTerminal(script: string, extraLines: string[]): string {
+  if (extraLines.length === 0) return script;
+  const block = extraLines.join('\n');
+  if (/^\s*(?:configure\s+terminal|conf\s+t)\s*$/im.test(script)) {
+    return script.replace(
+      /^(\s*(?:configure\s+terminal|conf\s+t)\s*)$/im,
+      `$1\n${block}`
+    );
+  }
+  return `configure terminal\n${block}\n${script}`;
+}
+
+function insertVerifyShowAfterEnd(script: string, verifyCmd: string): string {
+  if (/^\s*end\s*$/im.test(script)) {
+    return script.replace(/^(\s*end\s*)$/im, `$1\n${verifyCmd}`);
+  }
+  return `${script}\nend\n${verifyCmd}`;
+}
+
+function verifyOnuInPostExecOutput(params: {
+  output: string;
+  verifyCmd: string;
+  onuIdx: number;
+  targetSn: string;
+}): { ranCheck: boolean; verified: boolean; detectedType: string | null } {
+  const { output, verifyCmd, onuIdx, targetSn } = params;
+  const cmdRegex = new RegExp(escapeRegExpLiteral(verifyCmd), 'gi');
+  let lastMatchIdx = -1;
+  let m: RegExpExecArray | null;
+  while ((m = cmdRegex.exec(output)) !== null) {
+    lastMatchIdx = m.index + m[0].length;
+  }
+  const verifySlice = lastMatchIdx >= 0 ? output.slice(lastMatchIdx) : output;
+  const ranCheck =
+    lastMatchIdx >= 0 ||
+    /interface\s+(?:gpon|epon)-olt_1\/\d+\/\d+/i.test(verifySlice);
+
+  const normalizedTargetSn = targetSn.replace(/[:.\-]/g, '').toUpperCase();
+  const onuRegex = new RegExp(
+    `\\bonu\\s+${onuIdx}\\s+type\\s+(\\S+)\\s+(?:sn|mac)\\s+([A-Za-z0-9.:\\-]+)`,
+    'gi'
+  );
+  while ((m = onuRegex.exec(verifySlice)) !== null) {
+    const foundSn = m[2].replace(/[:.\-]/g, '').toUpperCase();
+    if (foundSn === normalizedTargetSn) {
+      return { ranCheck: true, verified: true, detectedType: m[1].trim() };
+    }
+  }
+  return { ranCheck, verified: false, detectedType: null };
+}
+
 async function inspectLivePonPortIndices(params: {
   host: string;
   port: number;
@@ -6481,6 +6624,9 @@ async function inspectLivePonPortIndices(params: {
   existingSnIndex: number | null;
   nextFreeIndex: number;
   snByIndex: Map<number, string>;
+  availableOnuTypes: string[];
+  availableTcontProfiles: string[];
+  availableTrafficProfiles: string[];
 }> {
   const isEpon = Boolean(params.isEpon);
   const ponIf = `${isEpon ? 'epon-olt_' : 'gpon-olt_'}1/${params.boardNum}/${params.portNum}`;
@@ -6492,15 +6638,28 @@ async function inspectLivePonPortIndices(params: {
     password: params.password,
     enablePassword: params.enablePassword,
     commands: isEpon
-      ? [`show onu all-status ${ponIf}`, `show running-config interface ${ponIf}`]
-      : [`show gpon onu state ${ponIf}`, `show running-config interface ${ponIf}`],
-    timeoutMs: 12000,
+      ? [
+          `show onu all-status ${ponIf}`,
+          `show running-config interface ${ponIf}`,
+          `show onu-type epon`,
+        ]
+      : [
+          `show gpon onu state ${ponIf}`,
+          `show running-config interface ${ponIf}`,
+          `show onu-type gpon`,
+          `show gpon profile tcont`,
+          `show gpon profile traffic`,
+        ],
+    timeoutMs: 18000,
   });
 
   const usedSet = new Set<number>(params.dbUsedIndices || []);
   const snByIndex = new Map<number, string>();
   let existingSnIndex: number | null = null;
   const targetSn = (params.serialNumber || '').trim().toUpperCase();
+  let availableOnuTypes: string[] = [];
+  let availableTcontProfiles: string[] = [];
+  let availableTrafficProfiles: string[] = [];
 
   if (telnetRes.reachable && telnetRes.output) {
     // 1. Parse `onu <idx> type <type> (sn|mac) <SN/MAC>` from `show running-config interface (gpon|epon)-olt_1/B/P`
@@ -6525,6 +6684,20 @@ async function inspectLivePonPortIndices(params: {
         usedSet.add(st.onuIndex);
       }
     }
+
+    // 3. Parse real ONU types, TCONT profiles, and Traffic profiles present on the OLT
+    availableOnuTypes = parseZteOnuTypeNames(telnetRes.output);
+    if (!isEpon) {
+      availableTcontProfiles = parseZteGponProfileSection(
+        telnetRes.output,
+        /show\s+gpon\s+profile\s+tcont/i,
+        /show\s+gpon\s+profile\s+traffic/i
+      );
+      availableTrafficProfiles = parseZteGponProfileSection(
+        telnetRes.output,
+        /show\s+gpon\s+profile\s+traffic/i
+      );
+    }
   }
 
   const usedIndices = Array.from(usedSet).sort((a, b) => a - b);
@@ -6539,6 +6712,9 @@ async function inspectLivePonPortIndices(params: {
     existingSnIndex,
     nextFreeIndex,
     snByIndex,
+    availableOnuTypes,
+    availableTcontProfiles,
+    availableTrafficProfiles,
   };
 }
 
@@ -6578,17 +6754,17 @@ app.post(
         .map((u) => u.onu_index as number);
 
       const check = await inspectLivePonPortIndices({
-      host: olt.ip_address,
-      port: olt.telnet_port,
-      username: olt.olt_username,
-      password: olt.olt_password,
-      enablePassword: olt.enable_password,
-      boardNum: Number(board),
-      portNum: Number(port),
-      serialNumber: String(serialNumber),
-      dbUsedIndices,
-      isEpon: isOltSlotEpon(state, olt.id, Number(board)),
-    });
+        host: olt.ip_address,
+        port: olt.telnet_port,
+        username: olt.olt_username,
+        password: olt.olt_password,
+        enablePassword: olt.enable_password,
+        boardNum: Number(board),
+        portNum: Number(port),
+        serialNumber: String(serialNumber),
+        dbUsedIndices,
+        isEpon: isOltSlotEpon(state, olt.id, Number(board)),
+      });
 
       res.json({
         ok: true,
@@ -6596,6 +6772,9 @@ app.post(
         usedIndices: check.usedIndices,
         existingSnIndex: check.existingSnIndex,
         nextFreeIndex: check.nextFreeIndex,
+        availableOnuTypes: check.availableOnuTypes,
+        availableTcontProfiles: check.availableTcontProfiles,
+        availableTrafficProfiles: check.availableTrafficProfiles,
       });
     } catch (err) {
       res.status(500).json({ ok: false, error: (err as Error).message });
@@ -6703,11 +6882,27 @@ app.post('/api/telnet/exec', async (req, res) => {
   }
 
   let reallocatedOnuIndex: number | null = null;
+  let effectiveOnuType: string | null = null;
+  let authContext: {
+    proto: string;
+    isEpScript: boolean;
+    boardNum: number;
+    portNum: number;
+    safeIdx: number;
+    targetSn: string;
+    verifyCmd: string;
+    baseScriptWithoutPreEnsure: string;
+    availableOnuTypes: string[];
+    availableTcontProfiles: string[];
+    availableTrafficProfiles: string[];
+  } | null = null;
 
-  // Automatic ONU Index Collision Guard:
-  // If this script registers a new ONU (`interface gpon-olt_1/B/P` -> `onu <idx> type ALL sn <SN>`)
-  // without an explicit `no onu <idx>` (i.e. fresh Authorize), check the live OLT PON port first
-  // so it NEVER collides with or overwrites an existing ONU at `<idx>`!
+  // Automatic ONU Index Collision Guard + Live Profile Auto-Ensure (ZTE C300/C320):
+  // If this script registers a new ONU (`interface gpon-olt_1/B/P` -> `onu <idx> type <TYPE> sn <SN>`)
+  // without an explicit `no onu <idx>` (i.e. fresh Authorize):
+  // 1. Check live OLT PON port so it NEVER collides with an existing ONU at `<idx>`.
+  // 2. Check live `onu-type`, `tcont`, and `traffic` profiles on the OLT and auto-create or match missing ones.
+  // 3. Append post-exec `show running-config interface` verification so failed registrations are NEVER reported as OK!
   const isNewAuthScript =
     /interface\s+(gpon|epon)-olt_1\/(\d+)\/(\d+)/i.test(rawScript) &&
     /^\s*onu\s+(\d+)\s+type\s+(\S+)\s+(?:sn|mac)\s+([A-Za-z0-9.\-:]+)/im.test(rawScript) &&
@@ -6724,7 +6919,9 @@ app.post('/api/telnet/exec', async (req, res) => {
       const boardNum = parseInt(oltIfMatch[2], 10);
       const portNum = parseInt(oltIfMatch[3], 10);
       const requestedIdx = parseInt(onuRegMatch[1], 10);
+      const requestedOnuType = onuRegMatch[2].trim();
       const targetSn = onuRegMatch[3].trim().toUpperCase();
+      effectiveOnuType = requestedOnuType;
 
       const dbUsedIndices = state.onus
         .filter(
@@ -6787,15 +6984,139 @@ app.post('/api/telnet/exec', async (req, res) => {
           `  no onu ${safeIdx}\n$1`
         );
       }
+
+      const baseScriptWithoutPreEnsure = rawScript;
+      const preEnsureLines: string[] = [];
+
+      // 1. Ensure ONU type exists on the live ZTE OLT (fixes `%Error 20208: Onu type does not exist` when `ALL` is missing)
+      if (liveCheck.availableOnuTypes.length > 0) {
+        const exactCaseMatch = liveCheck.availableOnuTypes.find(
+          (t) => t.toLowerCase() === requestedOnuType.toLowerCase()
+        );
+        if (exactCaseMatch) {
+          if (exactCaseMatch !== requestedOnuType) {
+            rawScript = rawScript.replace(
+              new RegExp(`(\\bonu\\s+${safeIdx}\\s+type\\s+)${escapeRegExpLiteral(requestedOnuType)}\\b`, 'i'),
+              `$1${exactCaseMatch}`
+            );
+          }
+          effectiveOnuType = exactCaseMatch;
+        } else if (!isEpScript && requestedOnuType.toUpperCase() === 'ALL') {
+          console.log(
+            `[OLT Auto-Ensure] onu-type ALL not found on ${olt?.name || targetHost} (existing: ${liveCheck.availableOnuTypes.slice(0, 8).join(', ')}). Prepending onu-type ALL gpon creation.`
+          );
+          preEnsureLines.push(
+            'pon',
+            '  onu-type ALL gpon',
+            '  onu-type ALL gpon max-tcont 8',
+            '  onu-type ALL gpon max-gemport 32',
+            '  onu-type ALL gpon max-switch-perslot 8',
+            '  onu-type ALL gpon max-flow-perswitch 8',
+            '  onu-type ALL gpon max-iphost 5',
+            'exit'
+          );
+        } else {
+          const fallbackType = pickPreferredOnuType(liveCheck.availableOnuTypes, isEpScript);
+          if (fallbackType) {
+            console.log(
+              `[OLT Auto-Ensure] onu-type "${requestedOnuType}" not found on ${olt?.name || targetHost}. Switching to existing OLT type "${fallbackType}".`
+            );
+            rawScript = rawScript.replace(
+              new RegExp(`(\\bonu\\s+${safeIdx}\\s+type\\s+)${escapeRegExpLiteral(requestedOnuType)}\\b`, 'i'),
+              `$1${fallbackType}`
+            );
+            effectiveOnuType = fallbackType;
+          }
+        }
+      }
+
+      // 2. Ensure referenced GPON TCONT & Traffic profiles exist on the live ZTE OLT
+      if (!isEpScript) {
+        const gponProfileCreateLines: string[] = [];
+        if (liveCheck.availableTcontProfiles.length > 0) {
+          const tcontMatches = Array.from(rawScript.matchAll(/\btcont\s+\d+\s+profile\s+(\S+)/gi));
+          const createdTcont = new Set<string>();
+          for (const tm of tcontMatches) {
+            const profName = tm[1].trim();
+            const existingTcont = liveCheck.availableTcontProfiles.find(
+              (p) => p.toLowerCase() === profName.toLowerCase()
+            );
+            if (existingTcont) {
+              if (existingTcont !== profName) {
+                rawScript = rawScript.replace(
+                  new RegExp(`(\\btcont\\s+\\d+\\s+profile\\s+)${escapeRegExpLiteral(profName)}\\b`, 'gi'),
+                  `$1${existingTcont}`
+                );
+              }
+            } else if (!createdTcont.has(profName.toLowerCase())) {
+              createdTcont.add(profName.toLowerCase());
+              const maxBw = /10M|VOIP|MNG|MGMT/i.test(profName) ? 10240 : 1024000;
+              gponProfileCreateLines.push(`  profile tcont ${profName} type 4 maximum ${maxBw}`);
+            }
+          }
+        }
+        if (liveCheck.availableTrafficProfiles.length > 0) {
+          const trafficMatches = Array.from(
+            rawScript.matchAll(/\btraffic-limit\s+downstream\s+(\S+)/gi)
+          );
+          const createdTraffic = new Set<string>();
+          for (const trm of trafficMatches) {
+            const profName = trm[1].trim();
+            const existingTraffic = liveCheck.availableTrafficProfiles.find(
+              (p) => p.toLowerCase() === profName.toLowerCase()
+            );
+            if (existingTraffic) {
+              if (existingTraffic !== profName) {
+                rawScript = rawScript.replace(
+                  new RegExp(`(\\btraffic-limit\\s+downstream\\s+)${escapeRegExpLiteral(profName)}\\b`, 'gi'),
+                  `$1${existingTraffic}`
+                );
+              }
+            } else if (!createdTraffic.has(profName.toLowerCase())) {
+              createdTraffic.add(profName.toLowerCase());
+              const bw = /10M|VOIP|MNG|MGMT/i.test(profName) ? 10240 : 1024000;
+              gponProfileCreateLines.push(`  profile traffic ${profName} sir ${bw} pir ${bw}`);
+            }
+          }
+        }
+        if (gponProfileCreateLines.length > 0) {
+          console.log(
+            `[OLT Auto-Ensure] Prepending missing GPON profiles on ${olt?.name || targetHost}: ${gponProfileCreateLines.map((l) => l.trim()).join('; ')}`
+          );
+          preEnsureLines.push('gpon', ...gponProfileCreateLines, 'exit');
+        }
+      }
+
+      if (preEnsureLines.length > 0) {
+        rawScript = injectAfterConfigureTerminal(rawScript, preEnsureLines);
+      }
+
+      const verifyCmd = `show running-config interface ${proto}-olt_1/${boardNum}/${portNum}`;
+      authContext = {
+        proto,
+        isEpScript,
+        boardNum,
+        portNum,
+        safeIdx,
+        targetSn,
+        verifyCmd,
+        baseScriptWithoutPreEnsure,
+        availableOnuTypes: liveCheck.availableOnuTypes,
+        availableTcontProfiles: liveCheck.availableTcontProfiles,
+        availableTrafficProfiles: liveCheck.availableTrafficProfiles,
+      };
     }
   }
 
-  const cmdList = [rawScript];
+  const execScriptWithVerify = authContext
+    ? insertVerifyShowAfterEnd(rawScript, authContext.verifyCmd)
+    : rawScript;
+  const cmdList = [execScriptWithVerify];
   console.log(
     `[OLT Telnet Exec] Connecting to ${olt?.name || targetHost} (${targetHost}:${targetPort}) to run ${cmdList.length} command block(s)...`
   );
 
-  const result = await executeTelnetSession({
+  let result = await executeTelnetSession({
     host: targetHost,
     port: targetPort,
     username: targetUser,
@@ -6804,13 +7125,119 @@ app.post('/api/telnet/exec', async (req, res) => {
     commands: cmdList,
   });
 
+  let onuVerifiedOnOlt: boolean | undefined = undefined;
+  let cliWarnings: string[] = [];
+
+  if (authContext && result.ok) {
+    let verify = verifyOnuInPostExecOutput({
+      output: result.output,
+      verifyCmd: authContext.verifyCmd,
+      onuIdx: authContext.safeIdx,
+      targetSn: authContext.targetSn,
+    });
+
+    // If OLT rejected registration (e.g. `onu-type ALL` missing or creation unsupported on this C300 firmware),
+    // automatically retry ONCE using guaranteed-existing onu-type / tcont / traffic profiles from the OLT
+    // (or ZTE C300 factory default ZTE-F609 / ZTE-F460 if `show onu-type` returned empty).
+    if (verify.ranCheck && !verify.verified) {
+      const fallbackType =
+        pickPreferredOnuType(
+          authContext.availableOnuTypes,
+          authContext.isEpScript,
+          effectiveOnuType || undefined
+        ) ||
+        (effectiveOnuType?.toUpperCase() !== (authContext.isEpScript ? 'ZTE-F460' : 'ZTE-F609')
+          ? authContext.isEpScript
+            ? 'ZTE-F460'
+            : 'ZTE-F609'
+          : null);
+      const fallbackTcont = !authContext.isEpScript
+        ? pickPreferredProfile(authContext.availableTcontProfiles, ['1G', 'MAX', 'UP', 'default']) ||
+          'default'
+        : null;
+      const fallbackTraffic = !authContext.isEpScript
+        ? pickPreferredProfile(authContext.availableTrafficProfiles, ['1G', 'MAX', 'DOWN', 'default'])
+        : null;
+
+      if (fallbackType) {
+        console.log(
+          `[OLT Auto-Fallback Retry] ONU ${authContext.targetSn} did not appear on ${authContext.proto}-olt_1/${authContext.boardNum}/${authContext.portNum} after attempt 1. Retrying with OLT profiles: type=${fallbackType}, tcont=${fallbackTcont || '(keep)'}, traffic=${fallbackTraffic || '(keep)'}`
+        );
+        let retryScript = authContext.baseScriptWithoutPreEnsure.replace(
+          new RegExp(`(\\bonu\\s+${authContext.safeIdx}\\s+type\\s+)\\S+`, 'i'),
+          `$1${fallbackType}`
+        );
+        if (fallbackTcont) {
+          retryScript = retryScript.replace(
+            /(\btcont\s+\d+\s+profile\s+)\S+/gi,
+            `$1${fallbackTcont}`
+          );
+        }
+        if (fallbackTraffic) {
+          retryScript = retryScript.replace(
+            /(\btraffic-limit\s+downstream\s+)\S+/gi,
+            `$1${fallbackTraffic}`
+          );
+        } else if (!authContext.isEpScript && authContext.availableTrafficProfiles.length === 0) {
+          // If no traffic profiles exist on OLT, drop traffic-limit line so ONU registration still succeeds cleanly
+          retryScript = retryScript.replace(/^\s*gemport\s+\d+\s+traffic-limit\s+downstream\s+\S+\s*$/gim, '');
+        }
+        rawScript = retryScript;
+        effectiveOnuType = fallbackType;
+
+        const retryExecScript = insertVerifyShowAfterEnd(retryScript, authContext.verifyCmd);
+        const retryResult = await executeTelnetSession({
+          host: targetHost,
+          port: targetPort,
+          username: targetUser,
+          password: targetPass,
+          enablePassword: targetEnablePass,
+          commands: [retryExecScript],
+        });
+        result = {
+          ...retryResult,
+          output: `${result.output}\n\n--- [AUTO-FALLBACK RETRY: type=${fallbackType}] ---\n${retryResult.output}`,
+          durationMs: result.durationMs + retryResult.durationMs,
+        };
+        if (retryResult.ok) {
+          verify = verifyOnuInPostExecOutput({
+            output: retryResult.output,
+            verifyCmd: authContext.verifyCmd,
+            onuIdx: authContext.safeIdx,
+            targetSn: authContext.targetSn,
+          });
+        }
+      }
+    }
+
+    const cliErrors = extractZteCliErrors(result.output);
+    if (verify.verified) {
+      onuVerifiedOnOlt = true;
+      if (verify.detectedType) effectiveOnuType = verify.detectedType;
+      cliWarnings = cliErrors;
+    } else if (verify.ranCheck || cliErrors.length > 0) {
+      onuVerifiedOnOlt = false;
+      const errDetail =
+        cliErrors.slice(0, 3).join(' | ') ||
+        `ONU ${authContext.targetSn} tidak ditemukan pada show running-config interface ${authContext.proto}-olt_1/${authContext.boardNum}/${authContext.portNum}`;
+      result = {
+        ...result,
+        ok: false,
+        error: `Registrasi ONU ditolak oleh OLT ZTE: ${errDetail}`,
+      };
+    }
+  }
+
   console.log(
-    `[OLT Telnet Exec] ${olt?.name || targetHost} (${targetHost}:${targetPort}) -> ok=${result.ok}, executed=${result.commandsExecuted.length} cmds in ${result.durationMs}ms${result.error ? ` (error: ${result.error})` : ''}`
+    `[OLT Telnet Exec] ${olt?.name || targetHost} (${targetHost}:${targetPort}) -> ok=${result.ok}, verified=${onuVerifiedOnOlt ?? 'n/a'}, executed=${result.commandsExecuted.length} cmds in ${result.durationMs}ms${result.error ? ` (error: ${result.error})` : ''}`
   );
 
   res.json({
     ...result,
     reallocatedOnuIndex,
+    effectiveOnuType,
+    onuVerifiedOnOlt,
+    cliWarnings,
     effectiveCliScript: rawScript,
   });
 });

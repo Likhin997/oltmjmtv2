@@ -23,6 +23,8 @@ import {
   isEponBoard,
   isEponInterface,
   isMacAddressLike,
+  hasZteInvalidParamError,
+  parseZteShowCard,
   parseZteOpticalAttenuation,
   parseZteOnuDetailInfo,
   parseZteWanIpOutput,
@@ -435,24 +437,63 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   const [configuringEthPort, setConfiguringEthPort] =
     useState<EthPortSetting | null>(null);
 
-  const isSlotEpon = (slotNum: number): boolean => {
+  const isSlotEpon = (slotNum: number, checkCurrentOnuMac = false): boolean => {
+    if (checkCurrentOnuMac && isMacAddressLike(onu.serial_number)) {
+      return true;
+    }
     const slotCard = (db.olt_cards || []).find(
       (c) => c.olt_id === olt.id && c.slot === slotNum
     );
-    if (slotCard) return isEponBoard(slotCard.real_type || slotCard.type);
+    if (slotCard) {
+      if (isEponBoard(slotCard.real_type) || isEponBoard(slotCard.type)) {
+        return true;
+      }
+      if (slotCard.real_type || slotCard.type) {
+        return false;
+      }
+    }
     const slotPort = db.pon_ports.find(
       (p) =>
         p.olt_id === olt.id &&
         (p.slot === slotNum || Number(p.interface_name.split('/')[1]) === slotNum)
     );
     if (slotPort) {
-      return isEponInterface(slotPort.interface_name) || isEponBoard(slotPort.board_model);
+      if (isEponInterface(slotPort.interface_name) || isEponBoard(slotPort.board_model)) {
+        return true;
+      }
+    }
+    const ponTypes = String(
+      'supported_pon_types' in olt ? olt.supported_pon_types || '' : ''
+    ).toUpperCase();
+    if (ponTypes.includes('EPON') && !ponTypes.includes('GPON')) {
+      return true;
     }
     return isMacAddressLike(onu.serial_number);
   };
-  const isEponOnu = isSlotEpon(onu.board);
-  const onuPonInterface = `${isEponOnu ? 'epon-olt_' : 'gpon-olt_'}1/${onu.board}/${onu.port}`;
-  const onuInterface = `${isEponOnu ? 'epon-onu_' : 'gpon-onu_'}1/${onu.board}/${onu.port}:${onu.onu_index || 1}`;
+
+  const [resolvedLiveTarget, setResolvedLiveTarget] = useState<{
+    onuId: number;
+    onuInterface: string;
+    isEpon: boolean;
+  } | null>(null);
+  const activeResolvedTarget =
+    resolvedLiveTarget && resolvedLiveTarget.onuId === onu.id
+      ? resolvedLiveTarget
+      : null;
+
+  const isEponOnu = activeResolvedTarget
+    ? activeResolvedTarget.isEpon
+    : isSlotEpon(onu.board, true);
+  const defaultOnuInterface = `${isEponOnu ? 'epon-onu_' : 'gpon-onu_'}1/${onu.board}/${onu.port}:${onu.onu_index || 1}`;
+  const onuInterface = activeResolvedTarget
+    ? activeResolvedTarget.onuInterface
+    : defaultOnuInterface;
+  const onuPonInterface = onuInterface
+    .replace(/:\d+$/, '')
+    .replace(/^epon-onu_/i, 'epon-olt_')
+    .replace(/^gpon-onu_/i, 'gpon-olt_')
+    .replace(/^gpon_onu-/i, 'gpon_olt-')
+    .replace(/^epon_onu-/i, 'epon_olt-');
   const distanceKm = (onu.distance_m / 1000).toFixed(2);
 
   // Helper that immediately pushes CLI changes to the OLT via Telnet and displays live output
@@ -523,26 +564,43 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     }
   };
 
-  const pollLiveOnuStatusAndWanIp = async (showInConsole = false) => {
-    const cliCommands = isEponOnu
+  const buildStatusCliCommands = (targetIf: string, targetIsEpon: boolean): string[] =>
+    targetIsEpon
       ? [
-          `show interface ${onuInterface}`,
-          `show onu detail-info ${onuInterface}`,
-          `show pon power attenuation ${onuInterface}`,
+          `show interface ${targetIf}`,
+          `show onu detail-info ${targetIf}`,
+          `show pon power attenuation ${targetIf}`,
         ]
       : [
-          `show interface ${onuInterface}`,
-          `show gpon onu detail-info ${onuInterface}`,
-          `show pon power attenuation ${onuInterface}`,
-          `show gpon remote-onu ip-host ${onuInterface}`,
-          `show gpon remote-onu pppoe ${onuInterface}`,
-          `show gpon remote-onu wan-ip ${onuInterface}`,
+          `show interface ${targetIf}`,
+          `show gpon onu detail-info ${targetIf}`,
+          `show pon power attenuation ${targetIf}`,
+          `show gpon remote-onu ip-host ${targetIf}`,
+          `show gpon remote-onu pppoe ${targetIf}`,
+          `show gpon remote-onu wan-ip ${targetIf}`,
         ];
+
+  const pollLiveOnuStatusAndWanIp = async (showInConsole = false) => {
+    // Jika ONU masih berstatus UNCONFIGURED (belum di-authorize / belum punya index di OLT),
+    // hindari menembak `:1` palsu yang pasti ditolak OLT dengan `%Error 20202: Invalid parameter`.
+    if (onu.auth_status === 'UNCONFIGURED' || !onu.onu_index || onu.onu_index <= 0) {
+      if (showInConsole) {
+        setActiveConsoleOutput({
+          title: `Get status — ONU Belum Terdaftar (${onu.serial_number})`,
+          content: `ONU ${onu.serial_number} pada Slot ${onu.board} / Port ${onu.port} masih berstatus UNCONFIGURED (belum memiliki ONU Index di OLT).\nSilakan lakukan Authorize ONU terlebih dahulu sebelum menarik status live.`,
+        });
+      }
+      return;
+    }
+
+    let effectiveIf = onuInterface;
+    let effectiveIsEpon = isEponOnu;
+    let cliCommands = buildStatusCliCommands(effectiveIf, effectiveIsEpon);
     const cliJoined = cliCommands.slice(0, 5).join('\n');
 
     if (showInConsole) {
       setActiveConsoleOutput({
-        title: `Get status & WAN IP — ${onuInterface} (Connecting to ${olt.ip_address}:${olt.telnet_port}...)`,
+        title: `Get status & WAN IP — ${effectiveIf} (Connecting to ${olt.ip_address}:${olt.telnet_port}...)`,
         content: `Executing on ${olt.name} (${olt.ip_address}:${olt.telnet_port}):\n${cliJoined}\n\nWaiting for OLT response...`,
       });
     }
@@ -552,20 +610,148 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
       ...(showInConsole ? {} : { 'X-Background-Poll': '1' }),
     };
 
-    try {
-      const resp = await fetch('/api/telnet/exec', {
+    const runExec = async (cmds: string[]) => {
+      const r = await fetch('/api/telnet/exec', {
         method: 'POST',
         headers: bgHeaders,
         body: JSON.stringify({
           oltId: olt.id,
-          commands: cliCommands,
+          commands: cmds,
         }),
       });
-      const data = await resp.json();
+      return r.json();
+    };
+
+    try {
+      let data = await runExec(cliCommands);
+      let recoveryNote = '';
+      let relocatedCoords: { board: number; port: number; onu_index: number } | null = null;
+
       if (data.ok && data.output) {
-        const parsedDetail = parseZteOnuDetailInfo(data.output);
-        const parsedPower = parseZteOpticalAttenuation(data.output);
-        const parsedWan = parseZteWanIpOutput(data.output);
+        let parsedDetail = parseZteOnuDetailInfo(data.output);
+        let parsedPower = parseZteOpticalAttenuation(data.output);
+        let parsedWan = parseZteWanIpOutput(data.output);
+
+        // Deteksi error ZTE `%Error 20202: Invalid input detected at '^' marker.Invalid parameter`
+        // Penyebab umum: (1) Slot sebenarnya card EPON (ETGH/ETGO) tapi dikirim gpon-onu_,
+        // (2) OLT seri C600/C620/C650 pakai format gpon_onu-1/B/P:I, atau
+        // (3) ONU sudah pindah index/port atau sudah dihapus di OLT.
+        const primaryFailedInvalidParam =
+          hasZteInvalidParamError(data.output) &&
+          !parsedDetail.phaseState &&
+          parsedPower.onuRxDbm === null;
+
+        if (primaryFailedInvalidParam) {
+          const coord = `1/${onu.board}/${onu.port}:${onu.onu_index}`;
+          const candidates: Array<{ ifName: string; isEp: boolean; label: string }> = effectiveIsEpon
+            ? [
+                { ifName: `gpon-onu_${coord}`, isEp: false, label: 'GPON (C300/C320)' },
+                { ifName: `epon_onu-${coord}`, isEp: true, label: 'EPON (C600/Titan)' },
+              ]
+            : [
+                { ifName: `epon-onu_${coord}`, isEp: true, label: 'EPON (ETGH/ETGO)' },
+                { ifName: `gpon_onu-${coord}`, isEp: false, label: 'GPON (C600/Titan)' },
+              ];
+
+          let recovered = false;
+          for (const cand of candidates) {
+            if (cand.ifName === effectiveIf) continue;
+            const retryCmds = buildStatusCliCommands(cand.ifName, cand.isEp);
+            const retryData = await runExec(retryCmds);
+            if (retryData.ok && retryData.output) {
+              const retryDetail = parseZteOnuDetailInfo(retryData.output);
+              const retryPower = parseZteOpticalAttenuation(retryData.output);
+              if (
+                !hasZteInvalidParamError(retryData.output) ||
+                retryDetail.phaseState !== null ||
+                retryPower.onuRxDbm !== null
+              ) {
+                data = retryData;
+                effectiveIf = cand.ifName;
+                effectiveIsEpon = cand.isEp;
+                cliCommands = retryCmds;
+                parsedDetail = retryDetail;
+                parsedPower = retryPower;
+                parsedWan = parseZteWanIpOutput(retryData.output);
+                setResolvedLiveTarget({
+                  onuId: onu.id,
+                  onuInterface: cand.ifName,
+                  isEpon: cand.isEp,
+                });
+                recoveryNote = `\n[Auto-Recovery] Interface otomatis dialihkan ke ${cand.ifName} (${cand.label}).`;
+                recovered = true;
+                break;
+              }
+            }
+          }
+
+          // Jika semua format interface tetap `%Error 20202`, cari posisi asli ONU berdasarkan SN & cek `show card`
+          if (!recovered && showInConsole) {
+            const diagCmds: string[] = [];
+            if (onu.serial_number && !isMacAddressLike(onu.serial_number)) {
+              diagCmds.push(`show gpon onu by sn ${onu.serial_number}`);
+            }
+            diagCmds.push('show card');
+            const diagData = await runExec(diagCmds);
+            const diagOut = String(diagData?.output || '');
+
+            // Cek apakah `show gpon onu by sn <SN>` menemukan interface baru (misal ONU pindah port/index)
+            const snMatch = diagOut.match(
+              /\b((?:gpon|epon)[-_]onu[-_](\d+)\/(\d+)\/(\d+):(\d+))\b/i
+            );
+            if (snMatch && snMatch[1].toLowerCase() !== effectiveIf.toLowerCase()) {
+              const foundIf = snMatch[1];
+              const foundIsEpon = isEponInterface(foundIf);
+              const foundBoard = parseInt(snMatch[3], 10);
+              const foundPort = parseInt(snMatch[4], 10);
+              const foundIdx = parseInt(snMatch[5], 10);
+              const relocCmds = buildStatusCliCommands(foundIf, foundIsEpon);
+              const relocData = await runExec(relocCmds);
+              if (relocData.ok && relocData.output) {
+                data = relocData;
+                effectiveIf = foundIf;
+                effectiveIsEpon = foundIsEpon;
+                cliCommands = relocCmds;
+                parsedDetail = parseZteOnuDetailInfo(relocData.output);
+                parsedPower = parseZteOpticalAttenuation(relocData.output);
+                parsedWan = parseZteWanIpOutput(relocData.output);
+                setResolvedLiveTarget({
+                  onuId: onu.id,
+                  onuInterface: foundIf,
+                  isEpon: foundIsEpon,
+                });
+                relocatedCoords = {
+                  board: foundBoard,
+                  port: foundPort,
+                  onu_index: foundIdx,
+                };
+                recoveryNote = `\n[Auto-Relocate] ONU SN ${onu.serial_number} ditemukan aktif di ${foundIf} (sebelumnya tercatat di 1/${onu.board}/${onu.port}:${onu.onu_index}). Data port/index otomatis diperbarui.`;
+                recovered = true;
+              }
+            }
+
+            if (!recovered) {
+              const detectedCards = parseZteShowCard(diagOut);
+              const actualSlotCard = detectedCards.find((c) => c.slot === onu.board);
+              const slotCardInfo = actualSlotCard
+                ? `Slot ${onu.board} terdeteksi berisi card ${actualSlotCard.realType || actualSlotCard.type} (${actualSlotCard.ports} port, status: ${actualSlotCard.status}).`
+                : `Slot ${onu.board} tidak ditemukan aktif pada output 'show card' OLT.`;
+              const snNotFoundHint =
+                onu.serial_number && !isMacAddressLike(onu.serial_number)
+                  ? `SN ${onu.serial_number} tidak terdaftar pada OLT (kemungkinan sudah dihapus/unconfigured).`
+                  : `Interface ${effectiveIf} tidak ditemukan pada OLT.`;
+
+              setActiveConsoleOutput({
+                title: `⚠ Interface Tidak Ditemukan di OLT — ${effectiveIf}`,
+                content: `${data.output.trim()}\n\n--- [Diagnosa Otomatis %Error 20202: Invalid parameter] ---\n• ${slotCardInfo}\n• ${snNotFoundHint}\n• Kemungkinan penyebab:\n  1. ONU ${effectiveIf} sudah dihapus, belum terdaftar, atau pindah port/index langsung di OLT.\n  2. Data database lokal belum sinkron dengan kondisi terbaru di OLT.\n• Solusi: Buka halaman OLT Detail → klik "Sync Data & Config dari OLT (Telnet)" untuk menyinkronkan ulang kartu & daftar ONU terbaru.`,
+              });
+              return;
+            }
+          } else if (!recovered) {
+            // Background poll gagal `%Error 20202` — jangan timpa data redaman/status yang ada di DB
+            return;
+          }
+        }
 
         // Record real-time traffic & optical signal sample and update Daily/Weekly/Monthly/Yearly charts
         if (!isReadOnly) {
@@ -588,6 +774,11 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
         }
 
         const updatedFields: Partial<OnuRecord> = {};
+        if (relocatedCoords) {
+          updatedFields.board = relocatedCoords.board;
+          updatedFields.port = relocatedCoords.port;
+          updatedFields.onu_index = relocatedCoords.onu_index;
+        }
         if (parsedDetail.phaseState) {
           updatedFields.phase_state = parsedDetail.phaseState;
         }
@@ -608,9 +799,14 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
           if (parsedPower.onuRxDbm !== null) updatedFields.onu_rx_dbm = parsedPower.onuRxDbm;
           if (parsedPower.oltRxDbm !== null) updatedFields.olt_rx_dbm = parsedPower.oltRxDbm;
           if (parsedPower.onuTxDbm !== null) updatedFields.onu_tx_dbm = parsedPower.onuTxDbm;
-        } else {
+        } else if (parsedDetail.phaseState) {
+          // Hanya kosongkan sinyal jika phase_state benar-benar terbaca offline/LOS/dying-gasp (bukan saat CLI error!)
           updatedFields.onu_rx_dbm = null;
           updatedFields.olt_rx_dbm = null;
+        } else if (parsedPower.onuRxDbm !== null || parsedPower.oltRxDbm !== null) {
+          if (parsedPower.onuRxDbm !== null) updatedFields.onu_rx_dbm = parsedPower.onuRxDbm;
+          if (parsedPower.oltRxDbm !== null) updatedFields.olt_rx_dbm = parsedPower.oltRxDbm;
+          if (parsedPower.onuTxDbm !== null) updatedFields.onu_tx_dbm = parsedPower.onuTxDbm;
         }
 
         // Real PPPoE WAN IP assigned by MikroTik (from show gpon remote-onu ip-host / pppoe / wan-ip)
@@ -633,7 +829,7 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
           updatedFields.pppoe_password = parsedWan.password || cleanPppoePass;
         }
 
-        void onExecuteAction(onu.id, 'POLL_SIGNAL', cliJoined, updatedFields);
+        void onExecuteAction(onu.id, 'POLL_SIGNAL', cliCommands.slice(0, 5).join('\n'), updatedFields);
         if (showInConsole) {
           // Clean redundant `%Code 64040-GPONRM : No relate information to show.` from wan-ip when ip-host is used
           const cleanedConsole = data.output
@@ -642,7 +838,7 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
               ''
             )
             .trim();
-          const summaryBanner = `\n\n--- [Ringkasan Real-Time OLT & WAN PPPoE MikroTik] ---\nPhase State : ${
+          const summaryBanner = `\n\n--- [Ringkasan Real-Time OLT & WAN PPPoE MikroTik] ---${recoveryNote}\nInterface   : ${effectiveIf}\nPhase State : ${
             parsedDetail.phaseState || onu.phase_state
           }\nWAN PPPoE IP: ${
             parsedWan.currentIp || '0.0.0.0 (Belum terkoneksi PPPoE / Menunggu dial MikroTik)'
@@ -650,7 +846,7 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
             parsedWan.macAddress ? `\nWAN MAC     : ${parsedWan.macAddress}` : ''
           }`;
           setActiveConsoleOutput({
-            title: `Get status & Real WAN IP (LIVE OLT) — ${onuInterface}`,
+            title: `Get status & Real WAN IP (LIVE OLT) — ${effectiveIf}`,
             content: `${cleanedConsole || data.output}${summaryBanner}`,
           });
         }
@@ -662,9 +858,9 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
 
     if (showInConsole) {
       setActiveConsoleOutput({
-        title: `Get status — ${onuInterface}`,
-        content: `${olt.name}# show gpon onu detail-info ${onuInterface}
-ONU interface:         ${onuInterface}
+        title: `Get status — ${effectiveIf}`,
+        content: `${olt.name}# ${effectiveIsEpon ? 'show onu detail-info' : 'show gpon onu detail-info'} ${effectiveIf}
+ONU interface:         ${effectiveIf}
   Name:                ${onu.customer_name || onu.serial_number}
   Type:                ALL
   State:               ready
@@ -674,7 +870,7 @@ ONU interface:         ${onuInterface}
   ONU Distance:        ${onu.distance_m}m
   Online Duration:     ${onlineDuration}
 
-${olt.name}# show gpon remote-onu ip-host ${onuInterface}
+${olt.name}# show gpon remote-onu ip-host ${effectiveIf}
 Host ID:               1
 CurIP:                 ${onu.ip_address || '0.0.0.0'}
 Username:              ${onu.pppoe_username || onu.customer_name || onu.serial_number}`,
@@ -747,21 +943,40 @@ Username:              ${onu.pppoe_username || onu.customer_name || onu.serial_n
     });
 
     try {
-      const resp = await fetch('/api/telnet/exec', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          oltId: olt.id,
-          commands: [
-            `show running-config interface ${onuInterface}`,
-            `show onu running config ${onuInterface}`,
-          ],
-        }),
-      });
-      const data = await resp.json();
+      const fetchCfg = async (targetIf: string) => {
+        const r = await fetch('/api/telnet/exec', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            oltId: olt.id,
+            commands: [
+              `show running-config interface ${targetIf}`,
+              `show onu running config ${targetIf}`,
+            ],
+          }),
+        });
+        return r.json();
+      };
+
+      let targetIf = onuInterface;
+      let data = await fetchCfg(targetIf);
+      if (data.ok && data.output && hasZteInvalidParamError(data.output)) {
+        const coord = `1/${onu.board}/${onu.port}:${onu.onu_index || 1}`;
+        const altIf = isEponOnu ? `gpon-onu_${coord}` : `epon-onu_${coord}`;
+        const retry = await fetchCfg(altIf);
+        if (retry.ok && retry.output && !hasZteInvalidParamError(retry.output)) {
+          data = retry;
+          targetIf = altIf;
+          setResolvedLiveTarget({
+            onuId: onu.id,
+            onuInterface: altIf,
+            isEpon: !isEponOnu,
+          });
+        }
+      }
       if (data.ok && data.output && data.output.trim().length > 20) {
         setActiveConsoleOutput({
-          title: `Show running-config (LIVE OLT) — ${onuInterface}`,
+          title: `Show running-config (LIVE OLT) — ${targetIf}`,
           content: data.output,
         });
       }
@@ -773,7 +988,7 @@ Username:              ${onu.pppoe_username || onu.customer_name || onu.serial_n
   const handleSwInfo = async () => {
     setActiveConsoleOutput({
       title: `SW info — ${onuInterface}`,
-      content: `${olt.name}# show gpon remote-onu equip ${onuInterface}
+      content: `${olt.name}# ${isEponOnu ? 'show onu detail-info' : 'show gpon remote-onu equip'} ${onuInterface}
 Vendor ID:           ZTEG
 Version:             V3.0
 Serial number:       ${onu.serial_number}
@@ -785,22 +1000,42 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
     });
 
     try {
-      const resp = await fetch('/api/telnet/exec', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          oltId: olt.id,
-          commands: [
-            isEponOnu
-              ? `show onu detail-info ${onuInterface}`
-              : `show gpon remote-onu equip ${onuInterface}`,
-          ],
-        }),
-      });
-      const data = await resp.json();
+      const fetchSw = async (targetIf: string, targetIsEp: boolean) => {
+        const r = await fetch('/api/telnet/exec', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            oltId: olt.id,
+            commands: [
+              targetIsEp
+                ? `show onu detail-info ${targetIf}`
+                : `show gpon remote-onu equip ${targetIf}`,
+            ],
+          }),
+        });
+        return r.json();
+      };
+
+      let targetIf = onuInterface;
+      let data = await fetchSw(targetIf, isEponOnu);
+      if (data.ok && data.output && hasZteInvalidParamError(data.output)) {
+        const coord = `1/${onu.board}/${onu.port}:${onu.onu_index || 1}`;
+        const altIsEp = !isEponOnu;
+        const altIf = altIsEp ? `epon-onu_${coord}` : `gpon-onu_${coord}`;
+        const retry = await fetchSw(altIf, altIsEp);
+        if (retry.ok && retry.output && !hasZteInvalidParamError(retry.output)) {
+          data = retry;
+          targetIf = altIf;
+          setResolvedLiveTarget({
+            onuId: onu.id,
+            onuInterface: altIf,
+            isEpon: altIsEp,
+          });
+        }
+      }
       if (data.ok && data.output && data.output.trim().length > 15) {
         setActiveConsoleOutput({
-          title: `SW info (LIVE OLT) — ${onuInterface}`,
+          title: `SW info (LIVE OLT) — ${targetIf}`,
           content: data.output,
         });
       }

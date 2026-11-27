@@ -62,6 +62,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
   const [portNum, setPortNum] = useState<number>(onu.port || 3);
   const [liveUsedIndices, setLiveUsedIndices] = useState<number[]>([]);
   const [liveExistingSnIndex, setLiveExistingSnIndex] = useState<number | null>(null);
+  const [liveOltOnuTypes, setLiveOltOnuTypes] = useState<string[]>([]);
   const [checkingPonLive, setCheckingPonLive] = useState<boolean>(false);
   const [manualOnuIndex, setManualOnuIndex] = useState<number | null>(null);
 
@@ -106,6 +107,9 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
         setLiveExistingSnIndex(
           typeof data.existingSnIndex === 'number' ? data.existingSnIndex : null
         );
+      }
+      if (data && Array.isArray(data.availableOnuTypes)) {
+        setLiveOltOnuTypes(data.availableOnuTypes);
       }
     } catch {
       // Fallback to local DB indices if offline
@@ -388,13 +392,20 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
   const targetOltIf = `${ponType === 'EPON' ? 'epon-olt_' : 'gpon-olt_'}1/${boardNum}/${portNum}`;
   const targetOnuIf = `${ponType === 'EPON' ? 'epon-onu_' : 'gpon-onu_'}1/${boardNum}/${portNum}:${allocatedOnuIndex}`;
 
+  const effectiveOnuType =
+    onuType && onuType.trim()
+      ? onuType.trim()
+      : ponType === 'EPON'
+      ? 'ZTE-F460'
+      : 'ALL';
+
   const generatedCli = useMemo(() => {
     return generateAuthorizeCliScript({
       firmwareVersion: olt?.firmware_version || 'V2.1.0',
       ponInterface: targetOltIf,
       onuIndex: allocatedOnuIndex,
       serialNumber: onu.serial_number,
-      onuType: ponType === 'EPON' ? onuType || 'ZTE-F460' : 'ALL',
+      onuType: effectiveOnuType,
       customerName: customerName.trim() || effectivePppoeUser || onu.serial_number,
       address: address.trim() || 'none',
       tcontProfile: selectedTcont?.profile_name || 'SMARTOLT-1G-UP',
@@ -422,6 +433,8 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
     });
   }, [
     olt?.firmware_version,
+    targetOltIf,
+    effectiveOnuType,
     boardNum,
     portNum,
     allocatedOnuIndex,
@@ -460,7 +473,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
         board: boardNum,
         port: portNum,
         onu_index: allocatedOnuIndex,
-        onu_type: 'ALL',
+        onu_type: effectiveOnuType,
         is_authorized: true,
         customer_name: finalName.toUpperCase(),
         address: address.trim() || 'none',
@@ -776,12 +789,17 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
               onChange={(e) => setOnuType(e.target.value)}
               className="w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
             >
-              {(db.onu_types && db.onu_types.length > 0
-                ? db.onu_types.map((t) => t.type_name)
-                : ['ALL', 'F670LV9.0', 'F609V3.0', 'SIGMA_F663NV3A', 'ZTE-F670L']
+              {Array.from(
+                new Set([
+                  ...liveOltOnuTypes,
+                  ...(db.onu_types && db.onu_types.length > 0
+                    ? db.onu_types.map((t) => t.type_name)
+                    : ['ALL', 'ZTE-F609', 'ZTE-F660', 'ZTE-F670L', 'F670LV9.0', 'F609V3.0']),
+                ])
               ).map((typeName) => (
                 <option key={typeName} value={typeName}>
                   {typeName}
+                  {liveOltOnuTypes.includes(typeName) ? ' (OLT)' : ''}
                 </option>
               ))}
             </select>

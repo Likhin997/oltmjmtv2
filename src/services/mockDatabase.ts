@@ -308,7 +308,7 @@ export interface ProvisioningLogRecord {
   summary_text?: string;
   cli_script: string;
   olt_response: string;
-  execution_status: 'SUCCESS' | 'FAILED' | 'SIMULATED';
+  execution_status: 'SUCCESS' | 'FAILED' | 'SIMULATED' | 'PENDING';
   executed_by: string;
   duration_ms: number;
   created_at: string;

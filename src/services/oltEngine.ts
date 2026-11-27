@@ -1242,16 +1242,17 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
     return (effectiveEnableNatEpon ? epLines : stripNatCommandsFromCliLines(epLines)).join('\n');
   }
 
-  // SmartOLT ZTE C300 standard: always register with `type ALL` and 8 ethuni ports
-  // to avoid OMCI Equipment-ID mismatch that blocks PPPoE ME creation on ZTE ONUs.
-  const zteOnuType = 'ALL';
+  // Use selected GPON ONU type & synced OLT profiles when provided; fallback to SmartOLT standard defaults.
+  // Backend /api/telnet/exec also auto-ensures missing `onu-type` / `tcont` / `traffic` profiles on the live ZTE C300 OLT.
+  const zteOnuType =
+    params.onuType && params.onuType.trim() ? params.onuType.trim() : 'ALL';
   const tcontUpProfile =
-    params.tcontProfile && params.tcontProfile.startsWith('SMARTOLT')
-      ? params.tcontProfile
+    params.tcontProfile && params.tcontProfile.trim()
+      ? params.tcontProfile.trim()
       : 'SMARTOLT-1G-UP';
   const trafficDownProfile =
-    params.speedProfile && params.speedProfile.startsWith('SMARTOLT')
-      ? params.speedProfile
+    params.speedProfile && params.speedProfile.trim()
+      ? params.speedProfile.trim()
       : 'SMARTOLT-1G-DOWN';
 
   const isMgmtOnly = Boolean(params.mgmtOnlyNoInternet);

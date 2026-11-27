@@ -3518,10 +3518,17 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           const serverUncfg = (data.state.onus as OnuRecord[]).filter(
             (u) => u.olt_id === o.id && !u.is_authorized
           );
+          const uncfgSnSet = new Set(
+            serverUncfg.map((u) => u.serial_number.trim().toUpperCase())
+          );
           setDb((prev) => ({
             ...prev,
             onus: [
-              ...prev.onus.filter((u) => u.olt_id !== o.id || u.is_authorized),
+              ...prev.onus.filter(
+                (u) =>
+                  u.olt_id !== o.id ||
+                  (u.is_authorized && !uncfgSnSet.has(u.serial_number.trim().toUpperCase()))
+              ),
               ...serverUncfg,
             ],
           }));
@@ -3732,6 +3739,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       telnet_port: number;
       olt_username: string;
       olt_password: string;
+    },
+    options?: {
+      suppressFailToast?: boolean;
     }
   ): Promise<{
     ok: boolean;
@@ -3739,6 +3749,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     error?: string;
     durationMs: number;
     reallocatedOnuIndex?: number;
+    effectiveOnuType?: string;
+    onuVerifiedOnOlt?: boolean;
+    cliWarnings?: string[];
+    effectiveCliScript?: string;
   }> => {
     const startMs = Date.now();
     const targetOlt = db.olts.find((o) => o.id === oltId);
@@ -3770,6 +3784,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             l.id === logId
               ? {
                   ...l,
+                  cli_script:
+                    typeof data.effectiveCliScript === 'string' && data.effectiveCliScript.trim()
+                      ? data.effectiveCliScript
+                      : l.cli_script,
                   olt_response: cleanOutput || '[OK - Executed on OLT]',
                   execution_status: 'SUCCESS',
                   duration_ms: elapsedMs,
@@ -3777,7 +3795,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               : l
           ),
         }));
-        showToast(`✓ LIVE OLT: ${summaryLabel} berhasil ter-push ke OLT (${elapsedMs}ms)`);
+        showToast(`✓ LIVE OLT: ${summaryLabel} berhasil ter-push & terverifikasi di OLT (${elapsedMs}ms)`);
         return {
           ok: true,
           output: cleanOutput,
@@ -3786,28 +3804,50 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             typeof data.reallocatedOnuIndex === 'number'
               ? data.reallocatedOnuIndex
               : undefined,
+          effectiveOnuType:
+            typeof data.effectiveOnuType === 'string' && data.effectiveOnuType.trim()
+              ? data.effectiveOnuType.trim()
+              : undefined,
+          onuVerifiedOnOlt:
+            typeof data.onuVerifiedOnOlt === 'boolean'
+              ? data.onuVerifiedOnOlt
+              : undefined,
+          cliWarnings: Array.isArray(data.cliWarnings) ? data.cliWarnings : undefined,
+          effectiveCliScript:
+            typeof data.effectiveCliScript === 'string' ? data.effectiveCliScript : undefined,
         };
       } else {
         const errMsg = data.error || 'Telnet execution failed';
+        const rawOut = typeof data.output === 'string' && data.output.trim() ? `\n\n${data.output.trim()}` : '';
         setDb((prev) => ({
           ...prev,
           provisioning_logs: prev.provisioning_logs.map((l) =>
             l.id === logId
               ? {
                   ...l,
-                  olt_response: `[TELNET ERROR] ${errMsg}`,
+                  cli_script:
+                    typeof data.effectiveCliScript === 'string' && data.effectiveCliScript.trim()
+                      ? data.effectiveCliScript
+                      : l.cli_script,
+                  olt_response: `[TELNET ERROR] ${errMsg}${rawOut}`,
                   execution_status: 'FAILED',
                   duration_ms: elapsedMs,
                 }
               : l
           ),
         }));
-        showToast(`⚠ Disimpan ke DB, namun gagal eksekusi Telnet OLT: ${errMsg}`);
+        if (!options?.suppressFailToast) {
+          showToast(`⚠ Gagal eksekusi Telnet OLT: ${errMsg}`);
+        }
         return {
           ok: false,
           output: data.output || '',
           error: errMsg,
           durationMs: elapsedMs,
+          onuVerifiedOnOlt:
+            typeof data.onuVerifiedOnOlt === 'boolean'
+              ? data.onuVerifiedOnOlt
+              : false,
         };
       }
     } catch (err) {
@@ -3826,16 +3866,20 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             : l
         ),
       }));
+      if (!options?.suppressFailToast) {
+        showToast(`⚠ Network Error saat menghubungi OLT: ${errMsg}`);
+      }
       return {
         ok: false,
         output: '',
         error: errMsg,
         durationMs: elapsedMs,
+        onuVerifiedOnOlt: false,
       };
     }
   };
 
-  // Authorize ONU Handler
+  // Authorize ONU Handler — verifies live OLT registration BEFORE marking ONU as Configured/Online
   const handleConfirmAuthorize = (
     onuId: number,
     updatedFields: Partial<OnuRecord>,
@@ -3852,8 +3896,11 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     const targetOltId = updatedFields.olt_id || targetOnu.olt_id || db.olts[0]?.id || 1;
     const targetBoard = updatedFields.board || targetOnu.board || 3;
     const targetPortNum = updatedFields.port || targetOnu.port || 1;
+    const isEponCli = /interface\s+epon-olt_/i.test(generatedCli);
+    const onuPrefix = isEponCli ? 'epon-onu_' : 'gpon-onu_';
+    const oltPrefix = isEponCli ? 'epon-olt_' : 'gpon-olt_';
     const logId = Date.now();
-    const onuIf = `gpon-onu_1/${targetBoard}/${targetPortNum}:${allocatedOnuIndex}`;
+    const onuIf = `${onuPrefix}1/${targetBoard}/${targetPortNum}:${allocatedOnuIndex}`;
 
     const newLog: ProvisioningLogRecord = {
       id: logId,
@@ -3862,130 +3909,132 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       serial_number: targetOnu.serial_number,
       action_type: 'AUTHORIZE',
       interface_target: onuIf,
-      summary_text: `${onuIf} authorized (${targetOnu.serial_number})`,
+      summary_text: `${onuIf} authorize (${targetOnu.serial_number})`,
       cli_script: generatedCli,
-      olt_response: '[Executing on OLT via Telnet...]',
-      execution_status: 'SUCCESS',
-      executed_by: 'likhin',
+      olt_response: '[Executing & verifying on OLT via Telnet...]',
+      execution_status: 'PENDING',
+      executed_by: currentUser?.username || 'admin',
       duration_ms: 0,
       created_at: 'Just now',
     };
 
-    setDb((prev) => {
-      const hasPonPort = prev.pon_ports.some(
-        (p) => p.olt_id === targetOltId && p.port_number === targetPortNum
-      );
-      const updatedPonPorts = hasPonPort
-        ? prev.pon_ports.map((p) =>
-            p.olt_id === targetOltId && p.port_number === targetPortNum
-              ? {
-                  ...p,
-                  oper_status: 'Up' as const,
-                  online_onus: p.online_onus + 1,
-                  total_onus: p.total_onus + 1,
-                }
-              : p
-          )
-        : [
-            ...prev.pon_ports,
-            {
-              id: targetOltId * 100 + targetPortNum,
-              rack: 1,
-              shelf: 3,
-              slot: targetBoard,
-              olt_id: targetOltId,
-              port_number: targetPortNum,
-              interface_name: `gpon-olt_1/${targetBoard}/${targetPortNum}`,
-              board_model: 'GTGH',
-              description: `PON 1/${targetBoard}/${targetPortNum}`,
-              admin_state: 'ENABLED' as const,
-              oper_status: 'Up' as const,
-              online_onus: 1,
-              total_onus: 1,
-              avg_signal_dbm: -23.5,
-              tx_power_dbm: 10.5,
-              max_onu_capacity: 128,
-            },
-          ];
-
-      const hasVlan = prev.vlans.some((v) => v.olt_id === targetOltId);
-      const updatedVlans = hasVlan
-        ? prev.vlans
-        : [
-            ...prev.vlans,
-            {
-              id: targetOltId * 10000 + 100,
-              olt_id: targetOltId,
-              vlan_id: 100,
-              name: 'TR069',
-              description: 'TR069 Management',
-              default_for: 'None selected',
-              used_for_mgmt_tr069_voip: true,
-              used_for_iptv: false,
-              dhcp_snooping: false,
-              lan_to_lan: false,
-              onus_count: 0,
-              service_type: 'TR069_MGMT' as const,
-              svlan_id: null,
-              is_default: false,
-            },
-            {
-              id: targetOltId * 10000 + 101,
-              olt_id: targetOltId,
-              vlan_id: 101,
-              name: 'PPPOE',
-              description: 'PPPOE Subscribers',
-              default_for: 'None selected',
-              used_for_mgmt_tr069_voip: false,
-              used_for_iptv: false,
-              dhcp_snooping: false,
-              lan_to_lan: false,
-              onus_count: 1,
-              service_type: 'PPPOE' as const,
-              svlan_id: null,
-              is_default: true,
-            },
-          ];
-
-      return {
-        ...prev,
-        onus: prev.onus.map((item) =>
-          item.id === onuId ? { ...item, ...updatedFields } : item
-        ),
-        pon_ports: updatedPonPorts,
-        vlans: updatedVlans,
-        provisioning_logs: [newLog, ...prev.provisioning_logs],
-      };
-    });
+    // Only append pending log first; do NOT mark ONU as Authorized/Online until OLT confirms!
+    setDb((prev) => ({
+      ...prev,
+      provisioning_logs: [newLog, ...prev.provisioning_logs],
+    }));
 
     setAuthorizingOnu(null);
-    setSelectedOnuId(onuId);
-    setActiveView('ONU_DETAIL');
     showToast(
-      `Mengeksekusi Authorize ${targetOnu.serial_number} pada ${onuIf} ke OLT...`
+      `Mengeksekusi & memverifikasi Authorize ${targetOnu.serial_number} pada ${onuIf} di OLT...`
     );
 
     void executeOltCliLive(
       targetOltId,
       generatedCli,
       logId,
-      `Authorize ${targetOnu.serial_number} (${onuIf})`
+      `Authorize ${targetOnu.serial_number} (${onuIf})`,
+      undefined,
+      { suppressFailToast: true }
     ).then((res) => {
-      if (res.reallocatedOnuIndex && res.reallocatedOnuIndex !== allocatedOnuIndex) {
-        const newIf = `gpon-onu_1/${targetBoard}/${targetPortNum}:${res.reallocatedOnuIndex}`;
-        setDb((prev) => ({
+      if (!res.ok) {
+        // OLT rejected registration or Telnet failed — keep ONU strictly in Unconfigured!
+        setActiveView('UNCONFIGURED');
+        showToast(
+          `❌ Gagal registrasi ONU ${targetOnu.serial_number} di OLT (tetap di Unconfigured): ${res.error || 'Perintah ditolak OLT'}`
+        );
+        return;
+      }
+
+      const finalOnuIndex =
+        typeof res.reallocatedOnuIndex === 'number'
+          ? res.reallocatedOnuIndex
+          : allocatedOnuIndex;
+      const finalOnuType =
+        res.effectiveOnuType || updatedFields.onu_type || targetOnu.onu_type;
+      const finalIf = `${onuPrefix}1/${targetBoard}/${targetPortNum}:${finalOnuIndex}`;
+
+      nextSyncIsUserMutationRef.current = true;
+      lastUserMutationAtRef.current = Date.now();
+
+      setDb((prev) => {
+        const hasPonPort = prev.pon_ports.some(
+          (p) =>
+            p.olt_id === targetOltId &&
+            (p.slot || targetBoard) === targetBoard &&
+            p.port_number === targetPortNum
+        );
+        const updatedPonPorts = hasPonPort
+          ? prev.pon_ports.map((p) =>
+              p.olt_id === targetOltId &&
+              (p.slot || targetBoard) === targetBoard &&
+              p.port_number === targetPortNum
+                ? {
+                    ...p,
+                    oper_status: 'Up' as const,
+                    online_onus: p.online_onus + 1,
+                    total_onus: p.total_onus + 1,
+                  }
+                : p
+            )
+          : [
+              ...prev.pon_ports,
+              {
+                id: targetOltId * 1000 + targetBoard * 32 + targetPortNum,
+                rack: 1,
+                shelf: 1,
+                slot: targetBoard,
+                olt_id: targetOltId,
+                port_number: targetPortNum,
+                interface_name: `${oltPrefix}1/${targetBoard}/${targetPortNum}`,
+                board_model: isEponCli ? 'ETGH' : 'GTGH',
+                description: `PON 1/${targetBoard}/${targetPortNum}`,
+                admin_state: 'ENABLED' as const,
+                oper_status: 'Up' as const,
+                online_onus: 1,
+                total_onus: 1,
+                avg_signal_dbm: -23.5,
+                tx_power_dbm: 10.5,
+                max_onu_capacity: isEponCli ? 64 : 128,
+              },
+            ];
+
+        return {
           ...prev,
           onus: prev.onus.map((item) =>
             item.id === onuId
-              ? { ...item, onu_index: res.reallocatedOnuIndex! }
+              ? {
+                  ...item,
+                  ...updatedFields,
+                  is_authorized: true,
+                  onu_index: finalOnuIndex,
+                  onu_type: finalOnuType,
+                  phase_state: 'working',
+                }
               : item
           ),
-        }));
+          pon_ports: updatedPonPorts,
+        };
+      });
+
+      setSelectedOnuId(onuId);
+      setActiveView('ONU_DETAIL');
+
+      if (finalOnuIndex !== allocatedOnuIndex) {
         showToast(
-          `✓ Anti-Collision: ONU ${targetOnu.serial_number} otomatis ditempatkan di index kosong ${newIf}`
+          `✓ Anti-Collision: ONU ${targetOnu.serial_number} terverifikasi di index kosong ${finalIf}`
+        );
+      } else if (
+        res.effectiveOnuType &&
+        updatedFields.onu_type &&
+        res.effectiveOnuType.toLowerCase() !== updatedFields.onu_type.toLowerCase()
+      ) {
+        showToast(
+          `✓ ONU ${targetOnu.serial_number} terverifikasi di OLT (${finalIf}) dengan ONU type ${res.effectiveOnuType}`
         );
       }
-      // Poll real-time status & MikroTik PPPoE WAN IP 4 seconds after authorization completes
+
+      // Poll real-time status & MikroTik PPPoE WAN IP 4 seconds after verified authorization
       setTimeout(() => {
         void pollRealtimeOltTelemetry(targetOltId, onuId);
       }, 4000);
