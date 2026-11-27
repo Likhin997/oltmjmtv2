@@ -583,7 +583,7 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   const pollLiveOnuStatusAndWanIp = async (showInConsole = false) => {
     // Jika ONU masih berstatus UNCONFIGURED (belum di-authorize / belum punya index di OLT),
     // hindari menembak `:1` palsu yang pasti ditolak OLT dengan `%Error 20202: Invalid parameter`.
-    if (onu.auth_status === 'UNCONFIGURED' || !onu.onu_index || onu.onu_index <= 0) {
+    if (!onu.is_authorized || !onu.onu_index || onu.onu_index <= 0) {
       if (showInConsole) {
         setActiveConsoleOutput({
           title: `Get status — ONU Belum Terdaftar (${onu.serial_number})`,

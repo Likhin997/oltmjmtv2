@@ -2551,6 +2551,19 @@ export function parseZteCardOutput(rawText: string): ParsedOltCard[] {
   return Array.from(cardsMap.values()).sort((a, b) => a.slot - b.slot);
 }
 
+/** Alias used by OnuDetailView diagnostics for parsing `show card` output */
+export function parseZteShowCard(rawText: string): ParsedOltCard[] {
+  return parseZteCardOutput(rawText);
+}
+
+/** Detects ZTE CLI invalid parameter / unknown interface errors (`%Error 20202`, `Invalid parameter`, etc.) */
+export function hasZteInvalidParamError(rawOutput: string): boolean {
+  if (!rawOutput) return false;
+  return /%Error\s+2020[0-9]|Invalid\s+input\s+detected|Invalid\s+parameter|Incomplete\s+command|%Code\s+\d+[^\r\n]*(?:not\s+exist|invalid|error)/i.test(
+    rawOutput
+  );
+}
+
 function expandVlanSpecToNumbers(spec: string): number[] {
   const nums: number[] = [];
   const parts = spec.split(',');
