@@ -4,7 +4,7 @@
 << /Type /Catalog /Pages 2 0 R >>
 endobj
 2 0 obj
-<< /Type /Pages /Kids [7 0 R 9 0 R 11 0 R 13 0 R] /Count 4 >>
+<< /Type /Pages /Kids [7 0 R 9 0 R 11 0 R 13 0 R 15 0 R] /Count 5 >>
 endobj
 3 0 obj
 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
@@ -16,7 +16,7 @@ endobj
 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique /Encoding /WinAnsiEncoding >>
 endobj
 6 0 obj
-<< /Length 6602 >>
+<< /Length 6704 >>
 stream
 q
 0.70 w
@@ -47,11 +47,11 @@ BT /F2 20.0 Tf 1 0 0 1 48.00 717.89 Tm (Monitoring Jaringan & Pelanggan) Tj ET
 Q
 q
 0.820 0.880 0.960 rg
-BT /F1 10.0 Tf 1 0 0 1 48.00 687.89 Tm (Dokumentasi ringkas dan mudah dipahami untuk Admin Operasional, Customer Service \(CS\),) Tj ET
+BT /F1 10.0 Tf 1 0 0 1 48.00 687.89 Tm (Dokumentasi ringkas untuk Admin Operasional, Customer Service \(CS\), dan Monitoring:) Tj ET
 Q
 q
 0.820 0.880 0.960 rg
-BT /F1 10.0 Tf 1 0 0 1 48.00 673.89 Tm (dan Monitoring - tanpa istilah teknis atau perintah jaringan yang rumit.) Tj ET
+BT /F1 10.0 Tf 1 0 0 1 48.00 673.89 Tm (termasuk langkah registrasi modem \(ONU\) baru, cek status, sinyal, dan grafik.) Tj ET
 Q
 q
 0.70 w
@@ -76,19 +76,19 @@ BT /F1 9.8 Tf 1 0 0 1 48.00 589.89 Tm (Aplikasi ini digunakan untuk memantau kon
 Q
 q
 0.200 0.250 0.330 rg
-BT /F1 9.8 Tf 1 0 0 1 48.00 575.39 Tm (langsung \(real-time\) melalui browser di komputer maupun HP. Anda dapat melihat berapa) Tj ET
+BT /F1 9.8 Tf 1 0 0 1 48.00 575.39 Tm (langsung \(real-time\) melalui browser di komputer maupun HP. Anda dapat melihat jumlah) Tj ET
 Q
 q
 0.200 0.250 0.330 rg
-BT /F1 9.8 Tf 1 0 0 1 48.00 560.89 Tm (banyak pelanggan yang sedang aktif \(Online\), mendeteksi apakah gangguan disebabkan) Tj ET
+BT /F1 9.8 Tf 1 0 0 1 48.00 560.89 Tm (pelanggan yang sedang aktif \(Online\), mendeteksi gangguan mati listrik vs kabel putus,) Tj ET
 Q
 q
 0.200 0.250 0.330 rg
-BT /F1 9.8 Tf 1 0 0 1 48.00 546.39 Tm (mati listrik atau kabel putus, mencari data pelanggan berdasarkan nama/area, hingga) Tj ET
+BT /F1 9.8 Tf 1 0 0 1 48.00 546.39 Tm (mendaftarkan modem \(ONU\) pelanggan baru, mencari data pelanggan, hingga memantau) Tj ET
 Q
 q
 0.200 0.250 0.330 rg
-BT /F1 9.8 Tf 1 0 0 1 48.00 531.89 Tm (memantau grafik pemakaian internet.) Tj ET
+BT /F1 9.8 Tf 1 0 0 1 48.00 531.89 Tm (grafik pemakaian internet.) Tj ET
 Q
 q
 0.80 w
@@ -107,19 +107,19 @@ BT /F2 9.8 Tf 1 0 0 1 62.00 491.39 Tm (Catatan Penting untuk Pengguna Non-Teknis
 Q
 q
 0.180 0.240 0.330 rg
-BT /F1 9.2 Tf 1 0 0 1 62.00 476.39 Tm (Anda tidak perlu memahami konfigurasi perangkat jaringan untuk memakai panduan) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 62.00 476.39 Tm (Anda tidak perlu memahami perintah teknis jaringan untuk memakai panduan ini.) Tj ET
 Q
 q
 0.180 0.240 0.330 rg
-BT /F1 9.2 Tf 1 0 0 1 62.00 462.89 Tm (ini. Cukup gunakan menu Dashboard, Daftar Pelanggan, dan Grafik untuk memantau) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 62.00 462.89 Tm (Cukup ikuti langkah klik pada layar melalui menu Dashboard, Unconfigured) Tj ET
 Q
 q
 0.180 0.240 0.330 rg
-BT /F1 9.2 Tf 1 0 0 1 62.00 449.39 Tm (layanan sehari-hari. Jika ditemukan gangguan kabel/sinyal lemah, teruskan) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 62.00 449.39 Tm (\(Modem Baru\), Daftar Pelanggan, dan Grafik. Jika ditemukan gangguan kabel atau) Tj ET
 Q
 q
 0.180 0.240 0.330 rg
-BT /F1 9.2 Tf 1 0 0 1 62.00 435.89 Tm (informasinya ke tim teknisi.) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 62.00 435.89 Tm (sinyal lemah, teruskan informasinya ke tim teknisi.) Tj ET
 Q
 q
 0.70 w
@@ -183,11 +183,11 @@ BT /F1 9.0 Tf 1 0 0 1 278.00 301.39 Tm (Hanya melihat Dashboard, status pelangga
 Q
 q
 0.220 0.280 0.360 rg
-BT /F1 9.0 Tf 1 0 0 1 278.00 288.39 Tm (sinyal, dan grafik. Tidak bisa mengubah atau) Tj ET
+BT /F1 9.0 Tf 1 0 0 1 278.00 288.39 Tm (sinyal, dan grafik. Tidak bisa) Tj ET
 Q
 q
 0.220 0.280 0.360 rg
-BT /F1 9.0 Tf 1 0 0 1 278.00 275.39 Tm (menghapus data \(aman dari salah klik\).) Tj ET
+BT /F1 9.0 Tf 1 0 0 1 278.00 275.39 Tm (registrasi/ubah/hapus data \(aman dari salah klik\).) Tj ET
 Q
 q
 0.50 w
@@ -205,7 +205,7 @@ BT /F1 9.0 Tf 1 0 0 1 148.00 252.39 Tm (Staf Area / Lapangan) Tj ET
 Q
 q
 0.220 0.280 0.360 rg
-BT /F1 9.0 Tf 1 0 0 1 278.00 252.39 Tm (Melihat dan membantu aktivasi/pengecekan pelanggan) Tj ET
+BT /F1 9.0 Tf 1 0 0 1 278.00 252.39 Tm (Melihat pelanggan serta registrasi modem baru) Tj ET
 Q
 q
 0.220 0.280 0.360 rg
@@ -231,7 +231,7 @@ BT /F1 9.0 Tf 1 0 0 1 148.00 203.39 Tm (NOC / Admin Harian) Tj ET
 Q
 q
 0.220 0.280 0.360 rg
-BT /F1 9.0 Tf 1 0 0 1 278.00 203.39 Tm (Memantau seluruh pelanggan, aktivasi modem baru,) Tj ET
+BT /F1 9.0 Tf 1 0 0 1 278.00 203.39 Tm (Memantau seluruh pelanggan, registrasi ONU baru,) Tj ET
 Q
 q
 0.220 0.280 0.360 rg
@@ -241,7 +241,7 @@ q
 0.50 w
 0.970 0.980 0.995 rg
 0.860 0.900 0.940 RG
-48.00 145.39 499.28 36.00 re B
+48.00 132.39 499.28 49.00 re B
 Q
 q
 0.420 0.180 0.720 rg
@@ -253,38 +253,42 @@ BT /F1 9.0 Tf 1 0 0 1 148.00 167.39 Tm (Admin Utama) Tj ET
 Q
 q
 0.220 0.280 0.360 rg
-BT /F1 9.0 Tf 1 0 0 1 278.00 167.39 Tm (Akses penuh mengelola data area, manajemen user &) Tj ET
+BT /F1 9.0 Tf 1 0 0 1 278.00 167.39 Tm (Akses penuh mengelola data area, registrasi ONU,) Tj ET
 Q
 q
 0.220 0.280 0.360 rg
-BT /F1 9.0 Tf 1 0 0 1 278.00 154.39 Tm (pembagian hak akses, serta backup/export data.) Tj ET
+BT /F1 9.0 Tf 1 0 0 1 278.00 154.39 Tm (manajemen user & hak akses, serta backup/export) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 9.0 Tf 1 0 0 1 278.00 141.39 Tm (data.) Tj ET
 Q
 q
 0.80 w
 0.990 0.970 0.910 rg
 0.850 0.560 0.060 RG
-48.00 58.89 499.28 74.50 re B
+48.00 45.89 499.28 74.50 re B
 Q
 q
 0.70 w
 0.850 0.560 0.060 rg
-48.00 58.89 4.00 74.50 re f
+48.00 45.89 4.00 74.50 re f
 Q
 q
 0.620 0.380 0.020 rg
-BT /F2 9.8 Tf 1 0 0 1 62.00 117.39 Tm (Mengapa Beberapa Tombol Tidak Muncul di Akun Saya?) Tj ET
+BT /F2 9.8 Tf 1 0 0 1 62.00 104.39 Tm (Mengapa Beberapa Tombol Tidak Muncul di Akun Saya?) Tj ET
 Q
 q
 0.180 0.240 0.330 rg
-BT /F1 9.2 Tf 1 0 0 1 62.00 102.39 Tm (Jika akun Anda menggunakan role VIEWER, tombol Edit, Hapus, atau Pengaturan) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 62.00 89.39 Tm (Jika akun Anda menggunakan role VIEWER, tombol Authorize, Edit, Hapus, atau) Tj ET
 Q
 q
 0.180 0.240 0.330 rg
-BT /F1 9.2 Tf 1 0 0 1 62.00 88.89 Tm (memang disembunyikan secara otomatis agar Anda dapat memantau data dengan) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 62.00 75.89 Tm (Pengaturan memang disembunyikan secara otomatis agar Anda dapat memantau data) Tj ET
 Q
 q
 0.180 0.240 0.330 rg
-BT /F1 9.2 Tf 1 0 0 1 62.00 75.39 Tm (tenang tanpa risiko mengubah konfigurasi jaringan.) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 62.00 62.39 Tm (dengan tenang tanpa risiko mengubah konfigurasi jaringan.) Tj ET
 Q
 q
 0.840 0.880 0.920 RG
@@ -296,7 +300,7 @@ BT /F1 8.5 Tf 1 0 0 1 48.00 28.00 Tm (Panduan Pengguna Aplikasi Monitoring OLT) 
 Q
 q
 0.300 0.380 0.480 rg
-BT /F2 8.5 Tf 1 0 0 1 485.28 28.00 Tm (Halaman 1 / 4) Tj ET
+BT /F2 8.5 Tf 1 0 0 1 485.28 28.00 Tm (Halaman 1 / 5) Tj ET
 Q
 endstream
 endobj
@@ -304,7 +308,7 @@ endobj
 << /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 6 0 R >>
 endobj
 8 0 obj
-<< /Length 7023 >>
+<< /Length 7028 >>
 stream
 q
 0.70 w
@@ -329,7 +333,7 @@ BT /F1 8.5 Tf 1 0 0 1 48.00 28.00 Tm (Panduan Pengguna Aplikasi Monitoring OLT) 
 Q
 q
 0.300 0.380 0.480 rg
-BT /F2 8.5 Tf 1 0 0 1 485.28 28.00 Tm (Halaman 2 / 4) Tj ET
+BT /F2 8.5 Tf 1 0 0 1 485.28 28.00 Tm (Halaman 2 / 5) Tj ET
 Q
 q
 0.70 w
@@ -484,41 +488,41 @@ q
 0.50 w
 0.970 0.980 0.995 rg
 0.860 0.900 0.940 RG
-48.00 360.39 499.28 49.00 re B
+48.00 373.39 499.28 36.00 re B
 Q
 q
 0.100 0.160 0.280 rg
-BT /F2 9.0 Tf 1 0 0 1 56.00 395.39 Tm (Configured / Pelanggan) Tj ET
+BT /F2 9.0 Tf 1 0 0 1 56.00 395.39 Tm (Unconfigured) Tj ET
 Q
 q
 0.220 0.280 0.360 rg
-BT /F1 9.0 Tf 1 0 0 1 194.00 395.39 Tm (Daftar lengkap seluruh pelanggan yang sudah aktif. Anda bisa mencari) Tj ET
+BT /F1 9.0 Tf 1 0 0 1 194.00 395.39 Tm (Daftar modem/ONU baru yang baru terpasang di lapangan dan menunggu) Tj ET
 Q
 q
 0.220 0.280 0.360 rg
-BT /F1 9.0 Tf 1 0 0 1 194.00 382.39 Tm (nama pelanggan, cek status internetnya, dan melihat kualitas) Tj ET
-Q
-q
-0.220 0.280 0.360 rg
-BT /F1 9.0 Tf 1 0 0 1 194.00 369.39 Tm (sinyalnya.) Tj ET
+BT /F1 9.0 Tf 1 0 0 1 194.00 382.39 Tm (didaftarkan \(registrasi/aktivasi\) agar bisa internetan.) Tj ET
 Q
 q
 0.50 w
 1.000 1.000 1.000 rg
 0.860 0.900 0.940 RG
-48.00 324.39 499.28 36.00 re B
+48.00 324.39 499.28 49.00 re B
 Q
 q
 0.100 0.160 0.280 rg
-BT /F2 9.0 Tf 1 0 0 1 56.00 346.39 Tm (Unconfigured) Tj ET
+BT /F2 9.0 Tf 1 0 0 1 56.00 359.39 Tm (Configured / Pelanggan) Tj ET
 Q
 q
 0.220 0.280 0.360 rg
-BT /F1 9.0 Tf 1 0 0 1 194.00 346.39 Tm (Daftar modem/perangkat baru yang baru terpasang di lapangan dan) Tj ET
+BT /F1 9.0 Tf 1 0 0 1 194.00 359.39 Tm (Daftar lengkap seluruh pelanggan yang sudah aktif. Anda bisa mencari) Tj ET
 Q
 q
 0.220 0.280 0.360 rg
-BT /F1 9.0 Tf 1 0 0 1 194.00 333.39 Tm (masih menunggu diaktifkan oleh tim operasional/teknisi.) Tj ET
+BT /F1 9.0 Tf 1 0 0 1 194.00 346.39 Tm (nama pelanggan, cek status internetnya, dan melihat kualitas) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 9.0 Tf 1 0 0 1 194.00 333.39 Tm (sinyalnya.) Tj ET
 Q
 q
 0.50 w
@@ -611,7 +615,7 @@ endobj
 << /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 8 0 R >>
 endobj
 10 0 obj
-<< /Length 8791 >>
+<< /Length 7647 >>
 stream
 q
 0.70 w
@@ -636,7 +640,7 @@ BT /F1 8.5 Tf 1 0 0 1 48.00 28.00 Tm (Panduan Pengguna Aplikasi Monitoring OLT) 
 Q
 q
 0.300 0.380 0.480 rg
-BT /F2 8.5 Tf 1 0 0 1 485.28 28.00 Tm (Halaman 3 / 4) Tj ET
+BT /F2 8.5 Tf 1 0 0 1 485.28 28.00 Tm (Halaman 3 / 5) Tj ET
 Q
 q
 0.70 w
@@ -646,6 +650,336 @@ Q
 q
 1.000 1.000 1.000 rg
 BT /F2 10.5 Tf 1 0 0 1 55.00 774.39 Tm (5) Tj ET
+Q
+q
+0.070 0.140 0.260 rg
+BT /F2 13.0 Tf 1 0 0 1 78.00 773.89 Tm (Langkah-Langkah Registrasi ONU \(Aktivasi Modem Baru\)) Tj ET
+Q
+q
+0.820 0.870 0.930 RG
+0.80 w 48.00 763.89 m 547.28 763.89 l S
+Q
+q
+0.200 0.250 0.330 rg
+BT /F1 9.4 Tf 1 0 0 1 48.00 747.89 Tm (Menu ini digunakan untuk mendaftarkan modem \(ONU\) pelanggan baru agar aktif dan) Tj ET
+Q
+q
+0.200 0.250 0.330 rg
+BT /F1 9.4 Tf 1 0 0 1 48.00 734.39 Tm (tersambung ke internet. Sebelum memulai, pastikan modem sudah tercolok listrik & kabel) Tj ET
+Q
+q
+0.200 0.250 0.330 rg
+BT /F1 9.4 Tf 1 0 0 1 48.00 720.89 Tm (fiber, serta siapkan Nama Pelanggan, Alamat, Wilayah/ODP, dan akun PPPoE \(jika mode) Tj ET
+Q
+q
+0.200 0.250 0.330 rg
+BT /F1 9.4 Tf 1 0 0 1 48.00 707.39 Tm (Routing\).) Tj ET
+Q
+q
+0.70 w
+0.980 0.990 1.000 rg
+0.820 0.870 0.930 RG
+48.00 618.89 499.28 67.00 re B
+Q
+q
+0.70 w
+0.060 0.520 0.340 rg
+56.00 661.89 22.00 18.00 re f
+Q
+q
+1.000 1.000 1.000 rg
+BT /F2 9.5 Tf 1 0 0 1 63.50 667.39 Tm (1) Tj ET
+Q
+q
+0.080 0.160 0.280 rg
+BT /F2 10.0 Tf 1 0 0 1 86.00 668.89 Tm (Buka Daftar Modem Baru \(Menu Unconfigured / Tombol Waiting Auth\)) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 9.1 Tf 1 0 0 1 86.00 654.89 Tm (Klik menu 'Unconfigured' di sidebar kiri, atau klik tombol kuning 'Waiting) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 9.1 Tf 1 0 0 1 86.00 641.89 Tm (Auth' di pojok kanan atas. Jika modem baru belum muncul di daftar, klik) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 9.1 Tf 1 0 0 1 86.00 628.89 Tm (tombol 'Refresh / Scan Unconfigured' lalu tunggu beberapa detik.) Tj ET
+Q
+q
+0.70 w
+0.980 0.990 1.000 rg
+0.820 0.870 0.930 RG
+48.00 543.89 499.28 67.00 re B
+Q
+q
+0.70 w
+0.060 0.520 0.340 rg
+56.00 586.89 22.00 18.00 re f
+Q
+q
+1.000 1.000 1.000 rg
+BT /F2 9.5 Tf 1 0 0 1 63.50 592.39 Tm (2) Tj ET
+Q
+q
+0.080 0.160 0.280 rg
+BT /F2 10.0 Tf 1 0 0 1 86.00 593.89 Tm (Cocokkan Nomor Serial Modem & Klik Tombol 'Authorize') Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 9.1 Tf 1 0 0 1 86.00 579.89 Tm (Cocokkan Serial Number \(SN\) atau MAC Address yang tertera di stiker bagian) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 9.1 Tf 1 0 0 1 86.00 566.89 Tm (bawah modem dengan daftar di layar. Setelah cocok, klik tombol hijau) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 9.1 Tf 1 0 0 1 86.00 553.89 Tm ('Authorize' pada baris modem tersebut.) Tj ET
+Q
+q
+0.70 w
+0.980 0.990 1.000 rg
+0.820 0.870 0.930 RG
+48.00 481.89 499.28 54.00 re B
+Q
+q
+0.70 w
+0.060 0.520 0.340 rg
+56.00 511.89 22.00 18.00 re f
+Q
+q
+1.000 1.000 1.000 rg
+BT /F2 9.5 Tf 1 0 0 1 63.50 517.39 Tm (3) Tj ET
+Q
+q
+0.080 0.160 0.280 rg
+BT /F2 10.0 Tf 1 0 0 1 86.00 518.89 Tm (Lengkapi Form Data Pelanggan & Layanan) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 9.1 Tf 1 0 0 1 86.00 504.89 Tm (Isi kolom wajib pada form registrasi sesuai panduan tabel ringkas di bawah) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 9.1 Tf 1 0 0 1 86.00 491.89 Tm (ini:) Tj ET
+Q
+q
+0.70 w
+0.090 0.160 0.280 rg
+48.00 451.89 499.28 22.00 re f
+Q
+q
+1.000 1.000 1.000 rg
+BT /F2 9.0 Tf 1 0 0 1 56.00 458.89 Tm (Kolom di Form) Tj ET
+Q
+q
+1.000 1.000 1.000 rg
+BT /F2 9.0 Tf 1 0 0 1 174.00 458.89 Tm (Cara Pengisian yang Benar) Tj ET
+Q
+q
+0.50 w
+1.000 1.000 1.000 rg
+0.860 0.900 0.940 RG
+48.00 431.69 499.28 20.20 re B
+Q
+q
+0.100 0.160 0.280 rg
+BT /F2 8.8 Tf 1 0 0 1 56.00 438.89 Tm (Name \(Nama\)) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 8.8 Tf 1 0 0 1 174.00 438.89 Tm (Isi nama pelanggan agar mudah dicari \(contoh: BUDI-SANTOSO atau 001-DEWI\).) Tj ET
+Q
+q
+0.50 w
+0.970 0.980 0.995 rg
+0.860 0.900 0.940 RG
+48.00 411.49 499.28 20.20 re B
+Q
+q
+0.100 0.160 0.280 rg
+BT /F2 8.8 Tf 1 0 0 1 56.00 418.69 Tm (Address \(Alamat\)) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 8.8 Tf 1 0 0 1 174.00 418.69 Tm (Isi alamat rumah/lokasi pelanggan secara singkat dan jelas.) Tj ET
+Q
+q
+0.50 w
+1.000 1.000 1.000 rg
+0.860 0.900 0.940 RG
+48.00 379.09 499.28 32.40 re B
+Q
+q
+0.100 0.160 0.280 rg
+BT /F2 8.8 Tf 1 0 0 1 56.00 398.49 Tm (Zone / RK / ODP) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 8.8 Tf 1 0 0 1 174.00 398.49 Tm (Pilih wilayah \(Zone\), Sektor/RK, dan kotak ODP terdekat. Jika wilayah) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 8.8 Tf 1 0 0 1 174.00 386.29 Tm (belum ada, klik tombol '+ Add' langsung di form.) Tj ET
+Q
+q
+0.50 w
+0.970 0.980 0.995 rg
+0.860 0.900 0.940 RG
+48.00 346.69 499.28 32.40 re B
+Q
+q
+0.100 0.160 0.280 rg
+BT /F2 8.8 Tf 1 0 0 1 56.00 366.09 Tm (ONU Mode) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 8.8 Tf 1 0 0 1 174.00 366.09 Tm (Pilih 'Routing' \(paling umum: modem langsung dial internet & Wi-Fi aktif\)) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 8.8 Tf 1 0 0 1 174.00 353.89 Tm (atau 'Bridging' \(jika pelanggan memakai router tambahan sendiri\).) Tj ET
+Q
+q
+0.50 w
+1.000 1.000 1.000 rg
+0.860 0.900 0.940 RG
+48.00 314.29 499.28 32.40 re B
+Q
+q
+0.100 0.160 0.280 rg
+BT /F2 8.8 Tf 1 0 0 1 56.00 333.69 Tm (User VLAN & Speed) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 8.8 Tf 1 0 0 1 174.00 333.69 Tm (Pilih VLAN layanan pelanggan \(misalnya PPPOE\) dan pilih Speed Profile) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 8.8 Tf 1 0 0 1 174.00 321.49 Tm (sesuai paket berlangganan.) Tj ET
+Q
+q
+0.50 w
+0.970 0.980 0.995 rg
+0.860 0.900 0.940 RG
+48.00 281.89 499.28 32.40 re B
+Q
+q
+0.100 0.160 0.280 rg
+BT /F2 8.8 Tf 1 0 0 1 56.00 301.29 Tm (PPPoE User & Pass) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 8.8 Tf 1 0 0 1 174.00 301.29 Tm (Khusus mode Routing: masukkan Username dan Password PPPoE milik pelanggan) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 8.8 Tf 1 0 0 1 174.00 289.09 Tm (dari data billing/MikroTik.) Tj ET
+Q
+q
+0.70 w
+0.980 0.990 1.000 rg
+0.820 0.870 0.930 RG
+48.00 192.89 499.28 80.00 re B
+Q
+q
+0.70 w
+0.060 0.520 0.340 rg
+56.00 248.89 22.00 18.00 re f
+Q
+q
+1.000 1.000 1.000 rg
+BT /F2 9.5 Tf 1 0 0 1 63.50 254.39 Tm (4) Tj ET
+Q
+q
+0.080 0.160 0.280 rg
+BT /F2 10.0 Tf 1 0 0 1 86.00 255.89 Tm (Klik 'Save / Authorize ONU' & Pastikan Status Menjadi Online) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 9.1 Tf 1 0 0 1 86.00 241.89 Tm (Periksa kembali data yang diisi lalu klik tombol 'Save / Authorize ONU'.) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 9.1 Tf 1 0 0 1 86.00 228.89 Tm (Tunggu 10-30 detik, kemudian buka menu 'Configured / Pelanggan' dan cari) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 9.1 Tf 1 0 0 1 86.00 215.89 Tm (nama pelanggan tersebut. Registrasi berhasil jika status berubah menjadi) Tj ET
+Q
+q
+0.220 0.280 0.360 rg
+BT /F1 9.1 Tf 1 0 0 1 86.00 202.89 Tm ('Online \(Hijau\)' dan sinyal berada di kisaran -14 s/d -24 dBm.) Tj ET
+Q
+q
+0.80 w
+0.990 0.970 0.910 rg
+0.850 0.560 0.060 RG
+48.00 110.39 499.28 74.50 re B
+Q
+q
+0.70 w
+0.850 0.560 0.060 rg
+48.00 110.39 4.00 74.50 re f
+Q
+q
+0.620 0.380 0.020 rg
+BT /F2 9.8 Tf 1 0 0 1 62.00 168.89 Tm (Perhatian: Hak Akses Registrasi ONU) Tj ET
+Q
+q
+0.180 0.240 0.330 rg
+BT /F1 9.2 Tf 1 0 0 1 62.00 153.89 Tm (Hanya akun dengan role ADMIN, OPERATOR, atau TECHNICIAN yang dapat melakukan) Tj ET
+Q
+q
+0.180 0.240 0.330 rg
+BT /F1 9.2 Tf 1 0 0 1 62.00 140.39 Tm (registrasi ONU baru. Akun dengan role VIEWER hanya dapat melihat daftar modem) Tj ET
+Q
+q
+0.180 0.240 0.330 rg
+BT /F1 9.2 Tf 1 0 0 1 62.00 126.89 Tm (yang menunggu aktivasi.) Tj ET
+Q
+endstream
+endobj
+11 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 10 0 R >>
+endobj
+12 0 obj
+<< /Length 8861 >>
+stream
+q
+0.70 w
+0.060 0.110 0.200 rg
+0.00 805.89 595.28 36.00 re f
+Q
+q
+0.950 0.970 1.000 rg
+BT /F2 9.5 Tf 1 0 0 1 48.00 818.89 Tm (OLT ZTE MJMT  |  Panduan Pengguna \(User Guide\)) Tj ET
+Q
+q
+0.560 0.780 0.980 rg
+BT /F1 8.5 Tf 1 0 0 1 412.28 818.89 Tm (Dokumentasi Non-Teknis) Tj ET
+Q
+q
+0.840 0.880 0.920 RG
+0.70 w 48.00 42.00 m 547.28 42.00 l S
+Q
+q
+0.450 0.520 0.600 rg
+BT /F1 8.5 Tf 1 0 0 1 48.00 28.00 Tm (Panduan Pengguna Aplikasi Monitoring OLT) Tj ET
+Q
+q
+0.300 0.380 0.480 rg
+BT /F2 8.5 Tf 1 0 0 1 485.28 28.00 Tm (Halaman 4 / 5) Tj ET
+Q
+q
+0.70 w
+0.050 0.450 0.820 rg
+48.00 767.89 22.00 20.00 re f
+Q
+q
+1.000 1.000 1.000 rg
+BT /F2 10.5 Tf 1 0 0 1 55.00 774.39 Tm (6) Tj ET
 Q
 q
 0.070 0.140 0.260 rg
@@ -730,11 +1064,15 @@ BT /F2 9.0 Tf 1 0 0 1 56.00 613.89 Tm (DyingGasp / Power) Tj ET
 Q
 q
 0.760 0.440 0.020 rg
-BT /F2 9.0 Tf 1 0 0 1 56.00 600.89 Tm (Fail \(Warna) Tj ET
+BT /F2 9.0 Tf 1 0 0 1 56.00 600.89 Tm (Fail) Tj ET
 Q
 q
 0.760 0.440 0.020 rg
-BT /F2 9.0 Tf 1 0 0 1 56.00 587.89 Tm (Kuning/Oranye\)) Tj ET
+BT /F2 9.0 Tf 1 0 0 1 56.00 587.89 Tm (\(Warna) Tj ET
+Q
+q
+0.760 0.440 0.020 rg
+BT /F2 9.0 Tf 1 0 0 1 56.00 574.89 Tm (Kuning/Oranye\)) Tj ET
 Q
 q
 0.220 0.280 0.360 rg
@@ -810,11 +1148,11 @@ q
 Q
 q
 0.380 0.440 0.520 rg
-BT /F2 9.0 Tf 1 0 0 1 56.00 502.89 Tm (Offline \(Warna Abu-) Tj ET
+BT /F2 9.0 Tf 1 0 0 1 56.00 502.89 Tm (Offline) Tj ET
 Q
 q
 0.380 0.440 0.520 rg
-BT /F2 9.0 Tf 1 0 0 1 56.00 489.89 Tm (abu\)) Tj ET
+BT /F2 9.0 Tf 1 0 0 1 56.00 489.89 Tm (\(Warna Abu-abu\)) Tj ET
 Q
 q
 0.220 0.280 0.360 rg
@@ -843,7 +1181,7 @@ q
 Q
 q
 1.000 1.000 1.000 rg
-BT /F2 10.5 Tf 1 0 0 1 55.00 450.39 Tm (6) Tj ET
+BT /F2 10.5 Tf 1 0 0 1 55.00 450.39 Tm (7) Tj ET
 Q
 q
 0.070 0.140 0.260 rg
@@ -959,7 +1297,7 @@ q
 Q
 q
 1.000 1.000 1.000 rg
-BT /F2 10.5 Tf 1 0 0 1 55.00 227.39 Tm (7) Tj ET
+BT /F2 10.5 Tf 1 0 0 1 55.00 227.39 Tm (8) Tj ET
 Q
 q
 0.070 0.140 0.260 rg
@@ -1005,11 +1343,11 @@ BT /F1 9.5 Tf 1 0 0 1 59.00 128.39 Tm (menampilkan pelanggan yang sedang LOS / P
 Q
 endstream
 endobj
-11 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 10 0 R >>
+13 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 12 0 R >>
 endobj
-12 0 obj
-<< /Length 5891 >>
+14 0 obj
+<< /Length 5788 >>
 stream
 q
 0.70 w
@@ -1034,7 +1372,7 @@ BT /F1 8.5 Tf 1 0 0 1 48.00 28.00 Tm (Panduan Pengguna Aplikasi Monitoring OLT) 
 Q
 q
 0.300 0.380 0.480 rg
-BT /F2 8.5 Tf 1 0 0 1 485.28 28.00 Tm (Halaman 4 / 4) Tj ET
+BT /F2 8.5 Tf 1 0 0 1 485.28 28.00 Tm (Halaman 5 / 5) Tj ET
 Q
 q
 0.70 w
@@ -1043,7 +1381,7 @@ q
 Q
 q
 1.000 1.000 1.000 rg
-BT /F2 10.5 Tf 1 0 0 1 55.00 774.39 Tm (8) Tj ET
+BT /F2 10.5 Tf 1 0 0 1 55.00 774.39 Tm (9) Tj ET
 Q
 q
 0.070 0.140 0.260 rg
@@ -1115,15 +1453,15 @@ Q
 q
 0.70 w
 0.050 0.450 0.820 rg
-48.00 568.39 22.00 20.00 re f
+48.00 568.39 24.00 20.00 re f
 Q
 q
 1.000 1.000 1.000 rg
-BT /F2 10.5 Tf 1 0 0 1 55.00 574.89 Tm (9) Tj ET
+BT /F2 10.5 Tf 1 0 0 1 53.00 574.89 Tm (10) Tj ET
 Q
 q
 0.070 0.140 0.260 rg
-BT /F2 13.0 Tf 1 0 0 1 78.00 574.39 Tm (Pertanyaan yang Sering Diajukan \(FAQ\)) Tj ET
+BT /F2 13.0 Tf 1 0 0 1 80.00 574.39 Tm (Pertanyaan yang Sering Diajukan \(FAQ\)) Tj ET
 Q
 q
 0.820 0.870 0.930 RG
@@ -1131,126 +1469,124 @@ q
 Q
 q
 0.060 0.280 0.560 rg
-BT /F2 9.8 Tf 1 0 0 1 48.00 548.39 Tm (T: Pelanggan mengeluh internet mati, apa yang harus saya cek pertama kali?) Tj ET
+BT /F2 9.6 Tf 1 0 0 1 48.00 548.39 Tm (T: Modem baru sudah dicolok tapi belum muncul di menu Unconfigured, apa sebabnya?) Tj ET
 Q
 q
 0.200 0.250 0.330 rg
-BT /F1 9.4 Tf 1 0 0 1 56.00 534.89 Tm (J: Cari nama pelanggan di menu Configured. Jika statusnya 'Power Fail / DyingGasp',) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 56.00 535.39 Tm (J: Pastikan lampu indikator daya modem menyala dan kabel fiber tidak sedang LOS) Tj ET
 Q
 q
 0.200 0.250 0.330 rg
-BT /F1 9.4 Tf 1 0 0 1 56.00 521.39 Tm (minta pelanggan mengecek listrik atau adaptor modem. Jika 'LOS \(Merah\)', segera) Tj ET
-Q
-q
-0.200 0.250 0.330 rg
-BT /F1 9.4 Tf 1 0 0 1 56.00 507.89 Tm (laporkan ke teknisi lapangan.) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 56.00 522.39 Tm (\(merah berkedip\). Lalu klik tombol Refresh/Scan pada menu Unconfigured.) Tj ET
 Q
 q
 0.060 0.280 0.560 rg
-BT /F2 9.8 Tf 1 0 0 1 48.00 486.39 Tm (T: Kenapa saya tiba-tiba keluar ke halaman Login?) Tj ET
+BT /F2 9.6 Tf 1 0 0 1 48.00 502.39 Tm (T: Pelanggan mengeluh internet mati, apa yang harus saya cek pertama kali?) Tj ET
 Q
 q
 0.200 0.250 0.330 rg
-BT /F1 9.4 Tf 1 0 0 1 56.00 472.89 Tm (J: Aplikasi memiliki fitur keamanan Auto-Logout jika tidak ada aktivitas selama 30) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 56.00 489.39 Tm (J: Cari nama pelanggan di menu Configured. Jika statusnya 'Power Fail / DyingGasp',) Tj ET
 Q
 q
 0.200 0.250 0.330 rg
-BT /F1 9.4 Tf 1 0 0 1 56.00 459.39 Tm (menit. Cukup masukkan kembali username dan password Anda untuk melanjutkan.) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 56.00 476.39 Tm (minta pelanggan mengecek listrik atau adaptor modem. Jika 'LOS \(Merah\)', segera) Tj ET
+Q
+q
+0.200 0.250 0.330 rg
+BT /F1 9.2 Tf 1 0 0 1 56.00 463.39 Tm (laporkan ke teknisi lapangan.) Tj ET
 Q
 q
 0.060 0.280 0.560 rg
-BT /F2 9.8 Tf 1 0 0 1 48.00 437.89 Tm (T: Saya lupa password akun saya, bagaimana cara mengatasinya?) Tj ET
+BT /F2 9.6 Tf 1 0 0 1 48.00 443.39 Tm (T: Kenapa saya tiba-tiba keluar ke halaman Login?) Tj ET
 Q
 q
 0.200 0.250 0.330 rg
-BT /F1 9.4 Tf 1 0 0 1 56.00 424.39 Tm (J: Hubungi Admin utama agar password akun Anda di-reset melalui menu Users -> Ubah) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 56.00 430.39 Tm (J: Aplikasi memiliki fitur keamanan Auto-Logout jika tidak ada aktivitas selama 30) Tj ET
 Q
 q
 0.200 0.250 0.330 rg
-BT /F1 9.4 Tf 1 0 0 1 56.00 410.89 Tm (Password. Setelah masuk kembali, segera ganti dengan password pribadi Anda.) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 56.00 417.39 Tm (menit. Cukup masukkan kembali username dan password Anda untuk melanjutkan.) Tj ET
 Q
 q
 0.060 0.280 0.560 rg
-BT /F2 9.8 Tf 1 0 0 1 48.00 389.39 Tm (T: Kenapa data di layar tidak langsung berubah saat modem pelanggan baru dinyalakan?) Tj ET
+BT /F2 9.6 Tf 1 0 0 1 48.00 397.39 Tm (T: Saya lupa password akun saya, bagaimana cara mengatasinya?) Tj ET
 Q
 q
 0.200 0.250 0.330 rg
-BT /F1 9.4 Tf 1 0 0 1 56.00 375.89 Tm (J: Sistem melakukan pembaruan otomatis secara berkala. Anda juga dapat menekan) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 56.00 384.39 Tm (J: Hubungi Admin utama agar password akun Anda di-reset melalui menu Users -> Ubah) Tj ET
 Q
 q
 0.200 0.250 0.330 rg
-BT /F1 9.4 Tf 1 0 0 1 56.00 362.39 Tm (tombol Refresh pada halaman detail pelanggan untuk mengecek kondisi terbaru secara) Tj ET
-Q
-q
-0.200 0.250 0.330 rg
-BT /F1 9.4 Tf 1 0 0 1 56.00 348.89 Tm (langsung.) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 56.00 371.39 Tm (Password. Setelah masuk kembali, segera ganti dengan password pribadi Anda.) Tj ET
 Q
 q
 0.060 0.280 0.560 rg
-BT /F2 9.8 Tf 1 0 0 1 48.00 327.39 Tm (T: Apakah aman jika saya salah klik saat sedang memantau pelanggan?) Tj ET
+BT /F2 9.6 Tf 1 0 0 1 48.00 351.39 Tm (T: Apakah aman jika saya salah klik saat sedang memantau pelanggan?) Tj ET
 Q
 q
 0.200 0.250 0.330 rg
-BT /F1 9.4 Tf 1 0 0 1 56.00 313.89 Tm (J: Untuk akun VIEWER, seluruh tombol ubah dan hapus sudah dinonaktifkan sehingga) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 56.00 338.39 Tm (J: Untuk akun VIEWER, seluruh tombol registrasi, ubah, dan hapus sudah dinonaktifkan) Tj ET
 Q
 q
 0.200 0.250 0.330 rg
-BT /F1 9.4 Tf 1 0 0 1 56.00 300.39 Tm (100% aman. Untuk akun Operator/Admin, selalu baca kotak konfirmasi sebelum menekan) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 56.00 325.39 Tm (sehingga 100% aman. Untuk Operator/Admin, selalu periksa data sebelum menekan tombol) Tj ET
 Q
 q
 0.200 0.250 0.330 rg
-BT /F1 9.4 Tf 1 0 0 1 56.00 286.89 Tm (tombol Simpan atau Hapus.) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 56.00 312.39 Tm (Simpan.) Tj ET
 Q
 q
 0.80 w
 0.940 0.960 0.990 rg
 0.250 0.360 0.520 RG
-48.00 184.89 499.28 74.50 re B
+48.00 213.89 499.28 74.50 re B
 Q
 q
 0.70 w
 0.250 0.360 0.520 rg
-48.00 184.89 4.00 74.50 re f
+48.00 213.89 4.00 74.50 re f
 Q
 q
 0.120 0.200 0.340 rg
-BT /F2 9.8 Tf 1 0 0 1 62.00 243.39 Tm (Butuh Bantuan Lebih Lanjut?) Tj ET
+BT /F2 9.8 Tf 1 0 0 1 62.00 272.39 Tm (Butuh Bantuan Lebih Lanjut?) Tj ET
 Q
 q
 0.180 0.240 0.330 rg
-BT /F1 9.2 Tf 1 0 0 1 62.00 228.39 Tm (Jika menemukan kendala teknis jaringan, perangkat pelanggan rusak, atau) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 62.00 257.39 Tm (Jika menemukan kendala teknis jaringan, perangkat pelanggan rusak, atau) Tj ET
 Q
 q
 0.180 0.240 0.330 rg
-BT /F1 9.2 Tf 1 0 0 1 62.00 214.89 Tm (membutuhkan penambahan hak akses wilayah/menu, silakan hubungi Administrator) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 62.00 243.89 Tm (membutuhkan penambahan hak akses wilayah/menu, silakan hubungi Administrator) Tj ET
 Q
 q
 0.180 0.240 0.330 rg
-BT /F1 9.2 Tf 1 0 0 1 62.00 201.39 Tm (sistem atau tim NOC perusahaan Anda.) Tj ET
+BT /F1 9.2 Tf 1 0 0 1 62.00 230.39 Tm (sistem atau tim NOC perusahaan Anda.) Tj ET
 Q
 endstream
 endobj
-13 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 12 0 R >>
+15 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 14 0 R >>
 endobj
 xref
-0 14
+0 16
 0000000000 65535 f 
 0000000015 00000 n 
 0000000064 00000 n 
-0000000141 00000 n 
-0000000238 00000 n 
-0000000340 00000 n 
-0000000445 00000 n 
-0000007099 00000 n 
-0000007251 00000 n 
-0000014326 00000 n 
-0000014478 00000 n 
-0000023322 00000 n 
-0000023476 00000 n 
-0000029420 00000 n 
+0000000148 00000 n 
+0000000245 00000 n 
+0000000347 00000 n 
+0000000452 00000 n 
+0000007208 00000 n 
+0000007360 00000 n 
+0000014440 00000 n 
+0000014592 00000 n 
+0000022292 00000 n 
+0000022446 00000 n 
+0000031360 00000 n 
+0000031514 00000 n 
+0000037355 00000 n 
 trailer
-<< /Size 14 /Root 1 0 R >>
+<< /Size 16 /Root 1 0 R >>
 startxref
-29574
+37509
 %%EOF
