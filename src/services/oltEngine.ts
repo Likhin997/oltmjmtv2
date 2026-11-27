@@ -203,6 +203,9 @@ export function parseZteUncfgOutput(rawOutput: string): UncfgOnuParsed[] {
   const isLikelySerialNumber = (tok: string): boolean => {
     const t = tok.trim().toUpperCase();
     if (!t || t.length < 8 || t.length > 20) return false;
+    // Every real GPON SN / 16-hex SN / EPON MAC contains at least one digit;
+    // reject pure alphabetic words (e.g. "ADMINISTRATIVELY", "CONFIGURATION").
+    if (!/\d/.test(t) || /^[A-Z]+$/.test(t)) return false;
     const ignored = new Set([
       'UNKNOWN',
       'UNCFG',
@@ -215,14 +218,15 @@ export function parseZteUncfgOutput(rawOutput: string): UncfgOnuParsed[] {
       'WORKING',
       'OFFLINE',
       'DYINGGASP',
+      'ADMINISTRATIVELY',
     ]);
     if (ignored.has(t)) return false;
-    // Standard 12-char GPON SN (e.g. ZTEGC6A394D4), 16-char Hex SN,
+    // Standard 12-char GPON SN (e.g. ZTEGC6A394D4, ZICG1B7399BE), 16-char Hex SN,
     // or EPON MAC address (e.g. aabb.ccdd.eeff, AA:BB:CC:DD:EE:FF, AA-BB-CC-DD-EE-FF)
     return (
       isMacAddressLike(t) ||
       /^[A-Z]{4}[0-9A-F]{8}$/i.test(t) ||
-      /^[A-Z]{4}[A-Z0-9]{8,12}$/i.test(t) ||
+      (/^[A-Z]{4}[A-Z0-9]{8,12}$/i.test(t) && /\d/.test(t.slice(4))) ||
       /^[0-9A-F]{16}$/i.test(t) ||
       (/^[A-Z0-9]{10,16}$/i.test(t) && /[A-Z]/i.test(t) && /\d/.test(t))
     );
@@ -244,14 +248,19 @@ export function parseZteUncfgOutput(rawOutput: string): UncfgOnuParsed[] {
       !line ||
       line.startsWith('---') ||
       line.startsWith('%') ||
-      /^(?:onuindex|oltindex|interface|no\s+related|mac\s+address)/i.test(line)
+      /^(?:onuindex|oltindex|interface|no\s+related|mac\s+address|x?gei_|smartgroup|vlan|mng|loopback|eth_)/i.test(
+        line
+      ) ||
+      /\bis\s+(?:administratively\s+)?(?:up|down)\b/i.test(line) ||
+      /\bline\s+protocol\b/i.test(line)
     ) {
       continue;
     }
 
-    // Match `gpon-onu_1/3/3:1`, `epon-olt_1/2/1`, `epon-onu_1/2/1:1`, or bare `1/2/1`
+    // Match ONLY at line start: `gpon-onu_1/3/3:1`, `epon-olt_1/2/1`, `epon-onu_1/2/1:1`, or bare `1/2/1`
+    // (anchored with `^` so uplink interfaces like `xgei_1/19/2` can NEVER match)
     const ifMatch = line.match(
-      /(?:(gpon|epon)-(?:onu|olt)_)?(\d+)\/(\d+)\/(\d+)(?::(\d+))?\s+(.+)$/i
+      /^(?:(gpon|epon)[-_](?:onu|olt)[-_])?(\d+)\/(\d+)\/(\d+)(?::(\d+))?\s+(.+)$/i
     );
     if (!ifMatch) continue;
     const explicitProto = (ifMatch[1] || '').toLowerCase();

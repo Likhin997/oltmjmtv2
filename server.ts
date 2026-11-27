@@ -2821,7 +2821,9 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
   const parsedStates = parseZteOnuStateOutput(combinedRawText);
   const baseinfoMap = parseZteOnuBaseinfoOutput(combinedRawText);
   const multiDetailsMap = parseZteMultiOnuDetailInfo(combinedRawText);
-  const parsedUncfg = parseZteUncfgOutput(`${rawUncfgOutput}\n${rawConfig}`);
+  const parsedUncfg = parseZteUncfgOutput(
+    rawUncfgOutput && rawUncfgOutput.trim().length > 0 ? rawUncfgOutput : rawConfig
+  );
   const extraCards = rawCardOutput ? parseZteCardOutput(rawCardOutput) : [];
   const powerRxMap = parseZtePonPowerRxTable(combinedRawText);
   const wanIpMap = parseZteMultiWanIpOutput(combinedRawText);
