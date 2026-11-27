@@ -5448,6 +5448,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               </span>
             </button>
 
+            <a
+              href="/Panduan_Pengguna_OLT_ZTE_MJMT.pdf"
+              download="Panduan_Pengguna_OLT_ZTE_MJMT.pdf"
+              title="Unduh Panduan Pengguna (PDF)"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition hover:border-emerald-500/40 hover:bg-slate-800 hover:text-emerald-300"
+            >
+              <Download className="h-3.5 w-3.5 text-emerald-400" />
+              <span className="hidden xl:inline">Panduan PDF</span>
+            </a>
+
             <button
               type="button"
               onClick={() => openChangePasswordModal(currentUser)}
