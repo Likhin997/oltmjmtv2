@@ -357,6 +357,7 @@ export interface WanIpParsed {
   cvlan: number | null;
   macAddress: string | null;
   mode: string | null;
+  hasLiveWanResponse?: boolean;
 }
 
 export interface OnuDetailInfoParsed {
@@ -635,10 +636,10 @@ export function parseZteWanIpOutput(rawOutput: string): WanIpParsed {
   const cleaned =
     remoteOnuIdx >= 0 ? cleanedFull.slice(remoteOnuIdx) : cleanedFull;
 
-  // Collect all candidate runtime IPs from CurIP / Cur IP / Current IP (ignoring `Identify: IP: 0.0.0.0`)
+  // Collect all candidate runtime IPs from CurIP / Cur IP / Current IP / IP address / standalone IP
   const ipCandidates: string[] = [];
   const ipRegex =
-    /(?:Cur\s*IP|Current\s+IP(?:\s+address)?|^\s*IP\s+address)\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/gim;
+    /(?:Cur\s*IP|Current\s+IP(?:\s+address)?|^\s*IP(?:\s+address)?)\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/gim;
   let im: RegExpExecArray | null;
   while ((im = ipRegex.exec(cleaned)) !== null) {
     if (im[1]) {
@@ -703,6 +704,13 @@ export function parseZteWanIpOutput(rawOutput: string): WanIpParsed {
     !rawPass.includes('%') &&
     !rawPass.toLowerCase().includes('password');
 
+  const hasLiveWanResponse =
+    ipCandidates.length > 0 ||
+    Boolean(gwMatch) ||
+    Boolean(statusMatch) ||
+    Boolean(macMatch) ||
+    /Host\s+ID\s*:/i.test(cleaned);
+
   return {
     currentIp: validIp,
     currentMask: maskMatch ? maskMatch[1].trim() : null,
@@ -718,6 +726,7 @@ export function parseZteWanIpOutput(rawOutput: string): WanIpParsed {
         : null,
     macAddress: macMatch ? macMatch[1].trim().replace(/\.$/, '') : null,
     mode: modeMatch ? modeMatch[1].trim() : null,
+    hasLiveWanResponse,
   };
 }
 
@@ -750,6 +759,7 @@ export function parseZteMultiWanIpOutput(
         cvlan: parsed.cvlan || prev.cvlan,
         macAddress: parsed.macAddress || prev.macAddress,
         mode: parsed.mode || prev.mode,
+        hasLiveWanResponse: Boolean(parsed.hasLiveWanResponse || prev.hasLiveWanResponse),
       });
     }
   }

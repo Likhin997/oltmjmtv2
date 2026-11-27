@@ -1431,6 +1431,36 @@ function mergeCollectionById<T extends { id: number }>(
   return Array.from(map.values());
 }
 
+/**
+ * Remove stale/bogus unconfigured ONU records that were previously created by
+ * false-positive parsing of uplink interface status lines (e.g. `xgei_1/19/2 is administratively down`
+ * -> Model `IS`, SN `ADMINISTRATIVELY`).
+ */
+function sanitizeInvalidUncfgOnus(onus: OnuRecord[] | undefined): OnuRecord[] {
+  if (!Array.isArray(onus)) return [];
+  const invalidWords = new Set([
+    'ADMINISTRATIVELY',
+    'UNKNOWN',
+    'UNCFG',
+    'UNCONFIGURED',
+    'INITIAL',
+    'PASSWORD',
+    'WORKING',
+    'OFFLINE',
+    'DYINGGASP',
+  ]);
+  return onus.filter((u) => {
+    if (!u) return false;
+    if (u.is_authorized) return true;
+    const sn = String(u.serial_number || '').trim().toUpperCase();
+    const model = String(u.onu_type || '').trim().toUpperCase();
+    if (!sn || invalidWords.has(sn) || model === 'IS') return false;
+    // Real GPON SN / 16-hex SN / EPON MAC always contains at least one digit
+    if (!/\d/.test(sn) || /^[A-Z]+$/.test(sn)) return false;
+    return true;
+  });
+}
+
 async function loadDatabaseState(
   explicitTenantId?: string
 ): Promise<SmartOltDatabaseState> {
@@ -1467,6 +1497,7 @@ async function loadDatabaseState(
         const parsed = JSON.parse(res.rows[0].json_payload) as SmartOltDatabaseState;
         parsed.users = bootstrapAndHashUsers(parsed.users, tenantId);
         parsed.uplink_ports = dedupeUplinkPorts(parsed.uplink_ports);
+        parsed.onus = sanitizeInvalidUncfgOnus(parsed.onus);
         // Reconcile zones, sectors, odbs, and ONUs from SQLite cache if SQLite has newer/more records
         if (sqliteState) {
           parsed.zones = mergeCollectionById(sqliteState.zones, parsed.zones);
@@ -1514,7 +1545,7 @@ async function loadDatabaseState(
                 (u) => `${u.olt_id}:${u.board}:${u.port}:${u.onu_index ?? u.serial_number}`
               )
             );
-            for (const su of sqliteState.onus) {
+            for (const su of sanitizeInvalidUncfgOnus(sqliteState.onus)) {
               const k = `${su.olt_id}:${su.board}:${su.port}:${su.onu_index ?? su.serial_number}`;
               if (!existingKeys.has(k)) {
                 existingKeys.add(k);
@@ -1523,6 +1554,7 @@ async function loadDatabaseState(
             }
           }
         }
+        parsed.onus = sanitizeInvalidUncfgOnus(parsed.onus);
         memoryStatesByTenant.set(
           tenantId,
           JSON.parse(JSON.stringify(parsed)) as SmartOltDatabaseState
@@ -1556,6 +1588,7 @@ async function loadDatabaseState(
   if (sqliteState) {
     sqliteState.users = bootstrapAndHashUsers(sqliteState.users, tenantId);
     sqliteState.uplink_ports = dedupeUplinkPorts(sqliteState.uplink_ports);
+    sqliteState.onus = sanitizeInvalidUncfgOnus(sqliteState.onus);
     if (
       isRoot &&
       sqliteState.olts.length === 0 &&
@@ -8136,11 +8169,22 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         }
 
         // Real WAN IP from MikroTik via OLT `show gpon remote-onu ip-host / pppoe / wan-ip`
+        // Clear stale IP if live OLT explicitly reports 0.0.0.0 / unconfigured or ONU is offline
         let nextIp =
           u.ip_address && u.ip_address !== '0.0.0.0' ? u.ip_address : null;
-        const effectiveWan = isFocused && focusedWan?.currentIp ? focusedWan : wanInfo;
+        const effectiveWan =
+          isFocused && (focusedWan?.currentIp || focusedWan?.hasLiveWanResponse)
+            ? focusedWan
+            : wanInfo;
         if (effectiveWan && effectiveWan.currentIp) {
           nextIp = effectiveWan.currentIp;
+        } else if (
+          (effectiveWan && effectiveWan.hasLiveWanResponse) ||
+          nextPhase === 'LOS' ||
+          nextPhase === 'DyingGasp' ||
+          nextPhase === 'OffLine'
+        ) {
+          nextIp = null;
         }
 
         const resolvedSn =
@@ -9437,7 +9481,11 @@ app.post('/api/onus/:id/poll-telemetry', async (req, res) => {
         olt_rx_dbm: nextOltRx,
         onu_tx_dbm: nextOnuTx,
         distance_m: parsedDetail.distanceM ?? onu.distance_m,
-        ip_address: parsedWan.currentIp || onu.ip_address,
+        ip_address: parsedWan.currentIp
+          ? parsedWan.currentIp
+          : parsedWan.hasLiveWanResponse || nextPhase !== 'working'
+          ? null
+          : onu.ip_address,
       };
 
       // If the OLT returned 0.00 Bps on the 120s average window while the ONU is actively working & connected on PPPoE,

@@ -810,8 +810,14 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
         }
 
         // Real PPPoE WAN IP assigned by MikroTik (from show gpon remote-onu ip-host / pppoe / wan-ip)
+        // Clear stale cached IP whenever live OLT explicitly reports 0.0.0.0 / unconfigured / offline
         if (parsedWan.currentIp) {
           updatedFields.ip_address = parsedWan.currentIp;
+        } else if (
+          parsedWan.hasLiveWanResponse ||
+          (parsedDetail.phaseState && parsedDetail.phaseState !== 'working')
+        ) {
+          updatedFields.ip_address = null;
         }
         // Auto-repair if DB previously had corrupted Telnet banner strings ('zte' or '% The password...')
         if (
